@@ -1,0 +1,45 @@
+name: Sync Fork with Upstream (tulir)
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/tulir/whatsmeow.git || git remote set-url upstream https://github.com/tulir/whatsmeow.git
+          git fetch upstream main
+
+      - name: Merge upstream into main
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Fork ja esta em dia com upstream/main. Nada a fazer."
+            exit 0
+          fi
+          if git merge --no-edit upstream/main; then
+            git push origin main
+            echo "Fork sincronizada: upstream/main incorporado ao main."
+          else
+            echo "::error::Conflito ao fazer merge de upstream/main. Resolva manualmente."
+            git merge --abort
+            exit 1
+          fi
