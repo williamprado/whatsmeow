@@ -344,20 +344,31 @@ type CarouselCard struct {
 // cards holds the individual cards (each rendered as a native-flow
 // InteractiveMessage).
 //
+// The optional cardType selects the carousel layout; if omitted it defaults to
+// HSCROLL_CARDS (horizontal scroll). Pass
+// waE2E.InteractiveMessage_CarouselMessage_ALBUM_IMAGE.Enum() to use the album
+// layout. Leaving the type unset would send UNKNOWN (the zero value), which makes
+// the carousel malformed and may stop it from rendering.
+//
 // Note: InteractiveMessage is not wrapped in a <biz>/native_flow node by the
 // current send core. See the file-level comment and PR notes.
-func BuildCarouselMessage(body string, cards []CarouselCard) *waE2E.Message {
+func BuildCarouselMessage(body string, cards []CarouselCard, cardType ...*waE2E.InteractiveMessage_CarouselMessage_CarouselCardType) *waE2E.Message {
 	protoCards := make([]*waE2E.InteractiveMessage, len(cards))
 	for i, card := range cards {
 		protoCards[i] = newInteractiveMessage(card.Body, card.Footer, card.Header, card.Buttons)
+	}
+	resolvedType := waE2E.InteractiveMessage_CarouselMessage_HSCROLL_CARDS.Enum()
+	if len(cardType) > 0 && cardType[0] != nil {
+		resolvedType = cardType[0]
 	}
 	return &waE2E.Message{
 		InteractiveMessage: &waE2E.InteractiveMessage{
 			Body: &waE2E.InteractiveMessage_Body{Text: proto.String(body)},
 			InteractiveMessage: &waE2E.InteractiveMessage_CarouselMessage_{
 				CarouselMessage: &waE2E.InteractiveMessage_CarouselMessage{
-					Cards:          protoCards,
-					MessageVersion: proto.Int32(interactiveMessageVersion),
+					Cards:            protoCards,
+					MessageVersion:   proto.Int32(interactiveMessageVersion),
+					CarouselCardType: resolvedType,
 				},
 			},
 		},

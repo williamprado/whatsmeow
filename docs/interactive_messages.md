@@ -27,6 +27,25 @@ API.
 See [How the binary button nodes are built](#how-the-binary-button-nodes-are-built)
 for what the last column means.
 
+> 🚧 **Core limitation — read before using.**
+>
+> Only **`BuildButtonsMessage`** and **`BuildListMessage`** work out of the box:
+> the send core wraps them in the required `<biz>` node automatically, so the
+> buttons render on the recipient's device.
+>
+> **`BuildTemplateMessage`, `BuildInteractiveMessage` and `BuildCarouselMessage`
+> are inert** — they build valid structs, but the current send core sends them
+> with **no** `<biz>` / `native_flow` node, so the recipient sees no buttons.
+> They stay inert until a **core patch in [`send.go`](../send.go)** is applied
+> **and validated against a real client**:
+>
+> 1. register the `TemplateMessage` / `InteractiveMessage` cases in
+>    `getButtonTypeFromMessage`, and
+> 2. add the matching `native_flow` attributes in `getButtonAttributes`.
+>
+> The exact patch is in
+> [If template / native-flow / carousel need to render reliably](#if-template--native-flow--carousel-need-to-render-reliably).
+
 ## Usage
 
 All helpers return a `*waE2E.Message`. Send it like any other message:
@@ -60,6 +79,8 @@ Up to `whatsmeow.MaxQuickReplyButtons` (3) buttons; extras are dropped to match
 WhatsApp's limit.
 
 ### Template buttons (`TemplateMessage`)
+
+> 🚧 **Inert until the core patch** — see the [core limitation](#interactive-button-message-helpers) above. The struct is built correctly but no buttons render without the `send.go` change.
 
 Mix quick-reply, URL and call buttons. Indexes are assigned automatically.
 
@@ -97,6 +118,8 @@ msg := whatsmeow.BuildListMessage(
 
 ### Native-flow interactive message (`InteractiveMessage`)
 
+> 🚧 **Inert until the core patch** — see the [core limitation](#interactive-button-message-helpers) above. The struct is built correctly but no buttons render without the `send.go` change.
+
 This is the modern interactive format. Header is optional (pass `nil`).
 
 ```go
@@ -122,8 +145,16 @@ header := whatsmeow.NewInteractiveHeaderImage(imageMessage, "Title", "Subtitle")
 
 ### Carousel (`InteractiveMessage` + `CarouselMessage`)
 
+> 🚧 **Inert until the core patch** — see the [core limitation](#interactive-button-message-helpers) above. The struct is built correctly but no buttons render without the `send.go` change.
+
 Each card is its own native-flow interactive message, optionally with a media
-header.
+header. The carousel layout defaults to `HSCROLL_CARDS`; pass an optional last
+argument to override it:
+
+```go
+msg := whatsmeow.BuildCarouselMessage("Check out our deals", cards,
+    waE2E.InteractiveMessage_CarouselMessage_ALBUM_IMAGE.Enum())
+```
 
 ```go
 msg := whatsmeow.BuildCarouselMessage("Check out our deals", []whatsmeow.CarouselCard{

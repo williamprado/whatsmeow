@@ -1,0 +1,6 @@
+# Local session/store files from the interactive-test example
+examples/interactive-test/session.db
+examples/interactive-test/session.db-*
+*.db
+*.db-shm
+*.db-wal

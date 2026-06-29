@@ -273,6 +273,9 @@ func TestBuildCarouselMessage(t *testing.T) {
 	if carousel.GetMessageVersion() != interactiveMessageVersion {
 		t.Errorf("MessageVersion = %d, want %d", carousel.GetMessageVersion(), interactiveMessageVersion)
 	}
+	if carousel.GetCarouselCardType() != waE2E.InteractiveMessage_CarouselMessage_HSCROLL_CARDS {
+		t.Errorf("CarouselCardType = %v, want HSCROLL_CARDS (default)", carousel.GetCarouselCardType())
+	}
 	cards := carousel.GetCards()
 	if len(cards) != 2 {
 		t.Fatalf("got %d cards, want 2", len(cards))
@@ -288,5 +291,14 @@ func TestBuildCarouselMessage(t *testing.T) {
 	}
 	if got := cards[0].GetNativeFlowMessage().GetButtons()[0].GetName(); got != nativeFlowCTAURL {
 		t.Errorf("card[0] button name = %q, want %q", got, nativeFlowCTAURL)
+	}
+}
+
+func TestBuildCarouselMessageCardTypeOverride(t *testing.T) {
+	msg := BuildCarouselMessage("intro", []CarouselCard{{Body: "Card"}},
+		waE2E.InteractiveMessage_CarouselMessage_ALBUM_IMAGE.Enum())
+	got := msg.GetInteractiveMessage().GetCarouselMessage().GetCarouselCardType()
+	if got != waE2E.InteractiveMessage_CarouselMessage_ALBUM_IMAGE {
+		t.Errorf("CarouselCardType = %v, want ALBUM_IMAGE", got)
 	}
 }
