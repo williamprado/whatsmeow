@@ -241,102 +241,86 @@ func logButtonResponses(evt any) {
 	}
 }
 
-// testMessage pairs a human label with a message and whether it is expected to
-// render with the current (unpatched) send core.
+// testMessage pairs a human label with a message to send.
 type testMessage struct {
-	label        string
-	msg          *waE2E.Message
-	rendersToday bool
+	label string
+	msg   *waE2E.Message
+}
+
+func sampleListSections() []whatsmeow.ListSection {
+	return []whatsmeow.ListSection{
+		{Title: "Section A", Rows: []whatsmeow.ListRow{
+			{Title: "A1", Description: "first", RowID: "a1"},
+			{Title: "A2", RowID: "a2"},
+		}},
+		{Title: "Section B", Rows: []whatsmeow.ListRow{
+			{Title: "B1", RowID: "b1"},
+		}},
+	}
 }
 
 func sendAll(ctx context.Context, client *whatsmeow.Client, to types.JID) {
+	// Native-flow single_select list (the renderable replacement for the legacy
+	// ListMessage). Wrapped in ViewOnce; routed via biz/bot by the core patch.
+	nfList, err := whatsmeow.BuildNativeFlowListMessage(
+		"Open menu", "Native-flow list: pick one", "interactive-test",
+		whatsmeow.NewInteractiveHeaderText("Menu", ""),
+		sampleListSections(),
+	)
+	if err != nil {
+		fmt.Printf("❌ failed to build native-flow list: %v\n", err)
+		return
+	}
+	// Audit log of the single_select buttonParamsJSON.
+	if im := nfList.GetViewOnceMessage().GetMessage().GetInteractiveMessage(); im != nil {
+		if btns := im.GetNativeFlowMessage().GetButtons(); len(btns) > 0 {
+			fmt.Printf("native_flow list buttonParamsJSON: %s\n", btns[0].GetButtonParamsJSON())
+		}
+	}
+
 	messages := []testMessage{
 		{
-			// Control: a plain text message. If this arrives but the button
-			// messages don't, the buttons are being dropped. If even this
-			// doesn't arrive, the problem is delivery/account, not the buttons.
-			label:        "ControlText (plain text)",
-			rendersToday: true,
-			msg:          &waE2E.Message{Conversation: proto.String("Control: plain text from interactive-test")},
+			label: "ControlText (plain text)",
+			msg:   &waE2E.Message{Conversation: proto.String("Control: plain text from interactive-test")},
 		},
 		{
-			label:        "ButtonsMessage (3 quick replies)",
-			rendersToday: true,
-			msg: whatsmeow.BuildButtonsMessage("Smoke test: quick replies", "interactive-test", []whatsmeow.QuickReplyButton{
-				{ID: "opt-1", DisplayText: "Option 1"},
-				{ID: "opt-2", DisplayText: "Option 2"},
-				{ID: "opt-3", DisplayText: "Option 3"},
-			}),
+			// Legacy ListMessage — sent for direct comparison; expected to be
+			// dropped by the recipient (see PR #2 report).
+			label: "LegacyListMessage (expected dropped)",
+			msg:   whatsmeow.BuildListMessage("Legacy list", "Pick something", "Open legacy list", "interactive-test", sampleListSections()),
 		},
 		{
-			label:        "ListMessage (2 sections)",
-			rendersToday: true,
-			msg: whatsmeow.BuildListMessage("Smoke test list", "Pick something", "Open list", "interactive-test", []whatsmeow.ListSection{
-				{
-					Title: "Section A",
-					Rows: []whatsmeow.ListRow{
-						{Title: "A1", Description: "first", RowID: "a1"},
-						{Title: "A2", RowID: "a2"},
-					},
-				},
-				{
-					Title: "Section B",
-					Rows: []whatsmeow.ListRow{
-						{Title: "B1", RowID: "b1"},
-					},
-				},
-			}),
+			label: "NativeFlowList (single_select)",
+			msg:   nfList,
 		},
 		{
-			label:        "TemplateMessage (reply/url/call)",
-			rendersToday: false,
-			msg: whatsmeow.BuildTemplateMessage("Smoke test: template buttons", "interactive-test", []*waE2E.HydratedTemplateButton{
-				whatsmeow.NewQuickReplyTemplateButton("Reply", "tmpl-reply"),
-				whatsmeow.NewURLTemplateButton("Open", "https://example.com"),
-				whatsmeow.NewCallTemplateButton("Call", "+5511999999999"),
-			}),
+			label: "NativeFlowQuickReply (quick_reply)",
+			msg: whatsmeow.BuildNativeFlowQuickReplyMessage("Native-flow quick replies", "interactive-test",
+				whatsmeow.NewInteractiveHeaderText("Choose", ""),
+				[]whatsmeow.QuickReplyButton{
+					{ID: "nfqr-yes", DisplayText: "Yes"},
+					{ID: "nfqr-no", DisplayText: "No"},
+					{ID: "nfqr-maybe", DisplayText: "Maybe"},
+				}),
 		},
 		{
-			label:        "InteractiveMessage (native flow)",
-			rendersToday: false,
-			msg: whatsmeow.BuildInteractiveMessage("Smoke test: native flow", "interactive-test",
+			// Known-good baseline native flow (quick_reply + CTA url).
+			label: "InteractiveMessage native flow (baseline Yes/Site)",
+			msg: whatsmeow.BuildInteractiveMessage("Baseline native flow", "interactive-test",
 				whatsmeow.NewInteractiveHeaderText("Header", "Subtitle"),
 				[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
 					whatsmeow.NewQuickReplyNativeFlowButton("Yes", "nf-yes"),
 					whatsmeow.NewURLNativeFlowButton("Site", "https://example.com"),
 				}),
 		},
-		{
-			label:        "CarouselMessage (2 cards)",
-			rendersToday: false,
-			msg: whatsmeow.BuildCarouselMessage("Smoke test: carousel", []whatsmeow.CarouselCard{
-				{
-					Body:   "Card 1",
-					Footer: "card one",
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						whatsmeow.NewURLNativeFlowButton("Buy 1", "https://example.com/1"),
-					},
-				},
-				{
-					Body: "Card 2",
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						whatsmeow.NewQuickReplyNativeFlowButton("Pick 2", "card-2"),
-					},
-				},
-			}),
-		},
 	}
 
 	for _, tm := range messages {
-		note := ""
-		if !tm.rendersToday {
-			note = "  (likely WON'T render until the send.go core patch — see docs/interactive_messages.md)"
-		}
 		resp, err := client.SendMessage(ctx, to, tm.msg)
 		if err != nil {
-			fmt.Printf("❌ %s: %v%s\n", tm.label, err, note)
+			fmt.Printf("❌ %s: %v\n", tm.label, err)
 		} else {
-			fmt.Printf("✅ %s: sent (id=%s)%s\n", tm.label, resp.ID, note)
+			fmt.Printf("✅ %s: sent (id=%s)\n", tm.label, resp.ID)
 		}
 		// Small gap between sends to keep ordering and avoid rate spikes.
 		time.Sleep(1500 * time.Millisecond)
