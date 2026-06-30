@@ -60,6 +60,19 @@ type CarouselCard struct {
 	Buttons []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton
 }
 
+// CarouselOptions configures BuildCarouselMessageWithOptions, including an
+// optional top-level media header (HeaderImage XOR HeaderVideo). The media must
+// be an already-uploaded *waE2E.ImageMessage / *waE2E.VideoMessage (see the
+// Client.UploadCarouselImage / UploadCarouselVideo helpers).
+type CarouselOptions struct {
+	Title       string
+	Body        string
+	Footer      string
+	HeaderImage *waE2E.ImageMessage
+	HeaderVideo *waE2E.VideoMessage
+	Cards       []CarouselCard
+}
+
 // BuildCarouselMessage builds a *waE2E.Message carousel, replicating the
 // reference structure. title/body/footer are the top-level header title, body
 // text and optional footer; cards holds the individual cards.
@@ -67,16 +80,36 @@ type CarouselCard struct {
 // Validation (returns an error): between MinCarouselCards and MaxCarouselCards
 // cards, each card must have at least one button, and a card may not set both
 // Image and Video.
+//
+// To add a media header at the top of the carousel, use
+// BuildCarouselMessageWithOptions.
 func BuildCarouselMessage(title, body, footer string, cards []CarouselCard) (*waE2E.Message, error) {
-	if len(cards) < MinCarouselCards {
-		return nil, fmt.Errorf("carousel: %d cards, need at least %d", len(cards), MinCarouselCards)
+	return BuildCarouselMessageWithOptions(CarouselOptions{
+		Title:  title,
+		Body:   body,
+		Footer: footer,
+		Cards:  cards,
+	})
+}
+
+// BuildCarouselMessageWithOptions builds a carousel with the full set of options,
+// including an optional top-level media header (opts.HeaderImage /
+// opts.HeaderVideo). When a header media is set, the root InteractiveMessage
+// header carries it with HasMediaAttachment=true; otherwise the header has no
+// media (HasMediaAttachment=false), matching BuildCarouselMessage.
+func BuildCarouselMessageWithOptions(opts CarouselOptions) (*waE2E.Message, error) {
+	if len(opts.Cards) < MinCarouselCards {
+		return nil, fmt.Errorf("carousel: %d cards, need at least %d", len(opts.Cards), MinCarouselCards)
 	}
-	if len(cards) > MaxCarouselCards {
-		return nil, fmt.Errorf("carousel: %d cards exceeds the max of %d", len(cards), MaxCarouselCards)
+	if len(opts.Cards) > MaxCarouselCards {
+		return nil, fmt.Errorf("carousel: %d cards exceeds the max of %d", len(opts.Cards), MaxCarouselCards)
+	}
+	if opts.HeaderImage != nil && opts.HeaderVideo != nil {
+		return nil, fmt.Errorf("carousel: top header cannot have both image and video")
 	}
 
-	protoCards := make([]*waE2E.InteractiveMessage, len(cards))
-	for i, card := range cards {
+	protoCards := make([]*waE2E.InteractiveMessage, len(opts.Cards))
+	for i, card := range opts.Cards {
 		if len(card.Buttons) == 0 {
 			return nil, fmt.Errorf("carousel: card %d (%q) has no buttons", i, card.Title)
 		}
@@ -86,12 +119,21 @@ func BuildCarouselMessage(title, body, footer string, cards []CarouselCard) (*wa
 		protoCards[i] = buildCarouselCard(card)
 	}
 
+	hasTopMedia := opts.HeaderImage != nil || opts.HeaderVideo != nil
+	topHeader := &waE2E.InteractiveMessage_Header{
+		Title:              proto.String(opts.Title),
+		HasMediaAttachment: proto.Bool(hasTopMedia),
+	}
+	switch {
+	case opts.HeaderImage != nil:
+		topHeader.Media = &waE2E.InteractiveMessage_Header_ImageMessage{ImageMessage: opts.HeaderImage}
+	case opts.HeaderVideo != nil:
+		topHeader.Media = &waE2E.InteractiveMessage_Header_VideoMessage{VideoMessage: opts.HeaderVideo}
+	}
+
 	top := &waE2E.InteractiveMessage{
-		Header: &waE2E.InteractiveMessage_Header{
-			Title:              proto.String(title),
-			HasMediaAttachment: proto.Bool(false),
-		},
-		Body: &waE2E.InteractiveMessage_Body{Text: proto.String(body)},
+		Header: topHeader,
+		Body:   &waE2E.InteractiveMessage_Body{Text: proto.String(opts.Body)},
 		InteractiveMessage: &waE2E.InteractiveMessage_CarouselMessage_{
 			CarouselMessage: &waE2E.InteractiveMessage_CarouselMessage{
 				Cards:          protoCards,
@@ -99,8 +141,8 @@ func BuildCarouselMessage(title, body, footer string, cards []CarouselCard) (*wa
 			},
 		},
 	}
-	if footer != "" {
-		top.Footer = &waE2E.InteractiveMessage_Footer{Text: proto.String(footer)}
+	if opts.Footer != "" {
+		top.Footer = &waE2E.InteractiveMessage_Footer{Text: proto.String(opts.Footer)}
 	}
 
 	// NOT wrapped in ViewOnce — the carousel goes directly as the root

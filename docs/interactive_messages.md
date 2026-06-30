@@ -284,6 +284,42 @@ Card buttons follow the reference mapping: `NewURLNativeFlowButton` → `cta_url
 (`{display_text, copy_code}`), `NewQuickReplyNativeFlowButton` → `quick_reply`
 (`{display_text, id}`), `NewCallNativeFlowButton` → `cta_call`.
 
+#### Top media header
+
+To put a media header at the **top** of the carousel (above the cards), use
+`BuildCarouselMessageWithOptions` with `HeaderImage` or `HeaderVideo` (mutually
+exclusive). When set, the root header carries the media with
+`HasMediaAttachment=true`; otherwise it has no media. `BuildCarouselMessage`
+stays unchanged (no top media).
+
+```go
+msg, err := whatsmeow.BuildCarouselMessageWithOptions(whatsmeow.CarouselOptions{
+    Title: "Our plans", Body: "Swipe to compare", Footer: "Footer",
+    HeaderImage: topImage, // uploaded *waE2E.ImageMessage (or HeaderVideo)
+    Cards:       cards,
+})
+```
+
+#### Media upload helpers (thumbnail + dimensions)
+
+Carousel cards (and the top header) need a JPEG thumbnail and width/height for the
+media to render on Web. These helpers upload via the native `cli.Upload` flow and
+fill those fields:
+
+```go
+// Image: dimensions + thumbnail are derived automatically from the bytes.
+img, err := cli.UploadCarouselImage(ctx, pngOrJpegBytes)
+
+// Video: Go can't extract a frame/dimensions without an external tool (the
+// reference uses ffmpeg), so pass a JPEG poster frame + dimensions/duration.
+vid, err := cli.UploadCarouselVideo(ctx, whatsmeow.CarouselVideo{
+    Data: mp4Bytes, JPEGThumbnail: posterJPEG, Width: 320, Height: 240, Seconds: 3,
+})
+```
+
+See `examples/interactive-test` for an ffmpeg-based way to generate the test
+video and its thumbnail. The per-card `Image`/`Video` exclusivity still applies.
+
 ## How the binary button nodes are built
 
 For an interactive message to render, WhatsApp expects the outgoing stanza to
