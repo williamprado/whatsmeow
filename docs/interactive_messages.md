@@ -107,7 +107,47 @@ _, err := cli.SendMessage(ctx, to, msg)
 > _, err = cli.SendMessage(ctx, to, msg)
 > ```
 
-### Quick-reply buttons (`ButtonsMessage`)
+### ✅ Renderable formats — use native flow for lists and quick replies
+
+Field testing (PR #2) showed the **legacy `BuildButtonsMessage` and
+`BuildListMessage` are dropped by the recipient**. The reference implementation
+(rsalcara/InfiniteAPI) never sends those legacy types — its "list" is a
+native-flow `single_select` interactive message, and quick replies are native-flow
+`quick_reply` buttons. Use these renderable replacements:
+
+```go
+// Single-select list (native flow, ViewOnce-wrapped). Returns an error if the
+// WhatsApp list limits are exceeded (10 sections, 10 rows/section, 100 total).
+msg, err := whatsmeow.BuildNativeFlowListMessage(
+    "Open menu",          // button that opens the list
+    "Choose a category",  // body
+    "Footer text",        // footer, "" to omit
+    whatsmeow.NewInteractiveHeaderText("Menu", ""), // header, or nil
+    []whatsmeow.ListSection{
+        {Title: "Drinks", Rows: []whatsmeow.ListRow{
+            {Title: "Coffee", Description: "Hot", RowID: "coffee"},
+            {Title: "Tea", RowID: "tea"},
+        }},
+    },
+)
+
+// Quick replies (native flow). Each button replies with its ID.
+msg = whatsmeow.BuildNativeFlowQuickReplyMessage("Pick one", "", nil,
+    []whatsmeow.QuickReplyButton{{ID: "yes", DisplayText: "Yes"}, {ID: "no", DisplayText: "No"}})
+```
+
+The list's `single_select` button carries `buttonParamsJSON` of the form
+`{"title":"<button>","sections":[{"title":"<sec>","rows":[{"id":"..","title":"..","description":".."}]}]}`,
+plus `messageParamsJSON:"{}"` and `messageVersion:2` on the NativeFlowMessage. A
+selected row comes back as an `InteractiveResponseMessage` /
+`NativeFlowResponseMessage` (`single_select_reply`).
+
+> ⚠️ **Deprecated:** `BuildButtonsMessage` (legacy `ButtonsMessage`) and
+> `BuildListMessage` (legacy `ListMessage`) are kept only for completeness — they
+> are **dropped by recipients** and should not be used. Prefer
+> `BuildNativeFlowQuickReplyMessage` and `BuildNativeFlowListMessage`.
+
+### Quick-reply buttons (`ButtonsMessage`) — deprecated, dropped by recipients
 
 ```go
 msg := whatsmeow.BuildButtonsMessage(
