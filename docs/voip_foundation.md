@@ -77,6 +77,24 @@ VOIP_ENABLED=1 go run ./examples/voip-receive
 
 `TEST_RECIPIENT` is not needed for receiving; no number is hardcoded.
 
+### Phase 0 test result (disposable account)
+
+Ran `VOIP_ENABLED=1 go run ./examples/voip-receive` and placed a WhatsApp call to
+the disposable account from another phone:
+
+```
+[VoIP WARN] VoIP ENABLED (Phase 0: receive-only, no audio) — DISPOSABLE accounts only
+Listening for incoming calls...
+📞 Incoming call: id=00B7905C56F45BB94F1B19897BCEBE42 from=258080709300320@lid creator=258080709300320@lid ts=2026-06-30T05:27:47-03:00
+[VoIP INFO] Sending <call><reject> for id=00B7905C…
+✅ rejected call id=00B7905C56F45BB94F1B19897BCEBE42
+[VoIP INFO] Call terminated: id=00B7905C… reason=
+```
+
+Detection (caller LID, callID, timestamp), a clean `<call><reject>`, and the
+follow-up `CallTerminate` all worked — zero errors, no audio. With `VOIP_ENABLED`
+unset the program connects but listens for nothing.
+
 ## What's left for Phase 1 (after Tech-Lead approval)
 
 1. **Packaging decision** (see `docs/calls_integration_plan.md`): vendor
