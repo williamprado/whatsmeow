@@ -24,22 +24,37 @@ $env:TEST_RECIPIENT = "5577988272902"
 go run ./examples/interactive-test
 ```
 
-1. Scan the QR code shown in the terminal with your **test** WhatsApp account
-   (this is the *sending* account).
-2. The program sends test messages to `TEST_RECIPIENT` and logs each result.
+1. Scan the **ASCII QR** shown in the terminal with your **test** WhatsApp account
+   (this is the *sending* account). If your terminal can't render the blocks, set
+   `QR_PNG=1` to also write a scannable `qr.png` (gitignored) you can open in an
+   image viewer.
+2. The program resolves the recipient's canonical JID (`IsOnWhatsApp`) — this
+   handles the Brazilian 9th-digit case — then sends the test messages and logs
+   each result.
 3. Press `Ctrl+C` to disconnect and exit.
 
 The session is cached in `session.db` (gitignored), so the QR is only needed on
 the first run. Delete that file to force a fresh login.
 
+## Environment variables
+
+| Var | Effect |
+| --- | --- |
+| `TEST_RECIPIENT` | Recipient phone number, digits only, no `+`. Comma-separate several (useful with `CHECK_ONLY`). The first one is the send target. |
+| `QR_PNG=1` | Also write `qr.png` in addition to the ASCII QR. |
+| `CHECK_ONLY=1` | Only run the `IsOnWhatsApp` lookup for each number and exit — sends nothing. |
+| `LISTEN_ONLY=1` | Connect and only listen for/log incoming button responses (no sending). Tap a rendered button on the recipient to see its payload here. |
+
 ## What renders
 
-With the current send core, only **`BuildButtonsMessage`** and
-**`BuildListMessage`** render on the recipient's device. The template,
-native-flow and carousel messages are sent too (to exercise the helpers), but
-they will **not** render until the `send.go` core patch described in
-[docs/interactive_messages.md](../../docs/interactive_messages.md) is applied and
-validated. The program annotates those sends in its output.
+This fork patches the send core (`send_interactive_patch.go`) so all five types
+get a `<biz>` routing node. **However, field testing showed that a non-Business
+sender's buttons still do not render as clickable** on a normal recipient — they
+arrive as "waiting for this message" / "your WhatsApp version is not compatible",
+and lists degrade to plain text. WhatsApp gates interactive-button rendering to
+official Business API senders. See
+[docs/interactive_messages_test_report.md](../../docs/interactive_messages_test_report.md)
+for the full before/after report.
 
 ## Notes
 

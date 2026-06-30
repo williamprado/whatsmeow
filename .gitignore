@@ -1,6 +1,11 @@
-# Local session/store files from the interactive-test example
+# Local session/store files and generated QR from the interactive-test example
 examples/interactive-test/session.db
 examples/interactive-test/session.db-*
+examples/interactive-test/qr.png
+
+# Build artifacts
+interactive-test.exe
+*.exe
 *.db
 *.db-shm
 *.db-wal
