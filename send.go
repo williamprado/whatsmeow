@@ -1152,13 +1152,19 @@ func (cli *Client) getMessageContent(
 	}
 
 	if buttonType := getButtonTypeFromMessage(message); buttonType != "" {
-		content = append(content, waBinary.Node{
-			Tag: "biz",
-			Content: []waBinary.Node{{
-				Tag:   buttonType,
-				Attrs: getButtonAttributes(message),
-			}},
-		})
+		// --- CUSTOM FORK PATCH (interactive buttons) — see send_interactive_patch.go ---
+		if bizNode, ok := customInteractiveBizNode(message); ok {
+			content = append(content, *bizNode)
+		} else {
+			// --- END CUSTOM FORK PATCH ---
+			content = append(content, waBinary.Node{
+				Tag: "biz",
+				Content: []waBinary.Node{{
+					Tag:   buttonType,
+					Attrs: getButtonAttributes(message),
+				}},
+			})
+		}
 	}
 	return content
 }

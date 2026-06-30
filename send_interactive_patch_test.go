@@ -63,6 +63,55 @@ func TestButtonAttributesForInteractive(t *testing.T) {
 	}
 }
 
+func TestCustomInteractiveBizNodeNested(t *testing.T) {
+	msg := BuildInteractiveMessage("body", "", nil, []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+		NewQuickReplyNativeFlowButton("Yes", "nf-yes"),
+		NewURLNativeFlowButton("Site", "https://example.com"),
+	})
+	node, ok := customInteractiveBizNode(msg)
+	if !ok || node == nil {
+		t.Fatal("customInteractiveBizNode returned ok=false")
+	}
+	if node.Tag != "biz" {
+		t.Fatalf("outer tag = %q, want biz", node.Tag)
+	}
+	interactive := node.GetChildren()
+	if len(interactive) != 1 || interactive[0].Tag != "interactive" {
+		t.Fatalf("expected single <interactive> child, got %+v", interactive)
+	}
+	if interactive[0].Attrs["type"] != "native_flow" || interactive[0].Attrs["v"] != interactiveNodeVersion {
+		t.Errorf("interactive attrs = %v", interactive[0].Attrs)
+	}
+	nf := interactive[0].GetChildren()
+	if len(nf) != 1 || nf[0].Tag != "native_flow" {
+		t.Fatalf("expected single <native_flow> grandchild, got %+v", nf)
+	}
+	// Different button kinds (quick_reply + cta_url) -> "mixed".
+	if nf[0].Attrs["name"] != "mixed" {
+		t.Errorf("native_flow name = %v, want mixed", nf[0].Attrs["name"])
+	}
+}
+
+func TestNativeFlowNameSingleKind(t *testing.T) {
+	// All buttons of the same kind -> that kind's name.
+	msg := BuildInteractiveMessage("body", "", nil, []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+		NewQuickReplyNativeFlowButton("Yes", "y"),
+		NewQuickReplyNativeFlowButton("No", "n"),
+	})
+	node, _ := customInteractiveBizNode(msg)
+	name := node.GetChildren()[0].GetChildren()[0].Attrs["name"]
+	if name != nativeFlowQuickReply {
+		t.Errorf("native_flow name = %v, want %s", name, nativeFlowQuickReply)
+	}
+}
+
+func TestCustomInteractiveBizNodeSkipsButtons(t *testing.T) {
+	// Buttons/list must not be handled by the custom biz node (upstream handles them).
+	if _, ok := customInteractiveBizNode(BuildButtonsMessage("b", "", nil)); ok {
+		t.Error("customInteractiveBizNode should not handle ButtonsMessage")
+	}
+}
+
 func TestButtonTypeUnwrapsInteractiveInViewOnce(t *testing.T) {
 	// The hook runs at the top of getButtonTypeFromMessage; a wrapped interactive
 	// message must still resolve via the existing recursion.

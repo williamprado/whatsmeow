@@ -84,3 +84,73 @@ func customButtonAttributes(msg *waE2E.Message) (waBinary.Attrs, bool) {
 		return nil, false
 	}
 }
+
+// customInteractiveBizNode builds the full nested <biz> node that official
+// WhatsApp Web clients send for native-flow interactive messages:
+//
+//	<biz>
+//	  <interactive type="native_flow" v="1">
+//	    <native_flow name="..." v="2"/>
+//	  </interactive>
+//	</biz>
+//
+// The single-level form (interactive node with no native_flow child) is rejected
+// by the server with error 479, so this adds the grandchild. The "name" hints at
+// the button kind ("mixed" when the message mixes kinds, otherwise the single
+// kind). The bool is false when this patch does not apply (getMessageContent
+// then builds the upstream single-child node).
+func customInteractiveBizNode(msg *waE2E.Message) (*waBinary.Node, bool) {
+	unwrapped := unwrapForButtons(msg)
+	if unwrapped.InteractiveMessage == nil && unwrapped.TemplateMessage == nil {
+		return nil, false
+	}
+	nativeFlow := waBinary.Node{
+		Tag: "native_flow",
+		Attrs: waBinary.Attrs{
+			"name": nativeFlowName(unwrapped),
+			"v":    "2",
+		},
+	}
+	return &waBinary.Node{
+		Tag: "biz",
+		Content: []waBinary.Node{{
+			Tag: "interactive",
+			Attrs: waBinary.Attrs{
+				"type": "native_flow",
+				"v":    interactiveNodeVersion,
+			},
+			Content: []waBinary.Node{nativeFlow},
+		}},
+	}, true
+}
+
+// unwrapForButtons peels the ViewOnce/Ephemeral wrappers the upstream button
+// helpers also unwrap, so this patch sees the inner message.
+func unwrapForButtons(msg *waE2E.Message) *waE2E.Message {
+	switch {
+	case msg.ViewOnceMessage != nil:
+		return unwrapForButtons(msg.ViewOnceMessage.Message)
+	case msg.ViewOnceMessageV2 != nil:
+		return unwrapForButtons(msg.ViewOnceMessageV2.Message)
+	case msg.EphemeralMessage != nil:
+		return unwrapForButtons(msg.EphemeralMessage.Message)
+	default:
+		return msg
+	}
+}
+
+// nativeFlowName returns the <native_flow> "name" attribute. If every native
+// flow button shares one name it is used; otherwise "mixed".
+func nativeFlowName(msg *waE2E.Message) string {
+	nf := msg.GetInteractiveMessage().GetNativeFlowMessage()
+	if nf == nil || len(nf.GetButtons()) == 0 {
+		return "mixed"
+	}
+	name := nf.GetButtons()[0].GetName()
+	for _, b := range nf.GetButtons()[1:] {
+		if b.GetName() != name {
+			return "mixed"
+		}
+	}
+	return name
+}

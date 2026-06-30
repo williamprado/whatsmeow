@@ -29,29 +29,34 @@ for what the last column means.
 
 > 🩹 **Fork patch applied (`send_interactive_patch.go`).**
 >
-> This fork now attaches the `<biz><interactive type="native_flow" v="1"/></biz>`
-> routing node for `TemplateMessage` and `InteractiveMessage` as well (upstream
-> only does it for `ButtonsMessage`/`ListMessage`). The patch is isolated in
-> [`send_interactive_patch.go`](../send_interactive_patch.go) with two 3-line
-> guarded hooks in [`send.go`](../send.go).
+> Upstream only attaches the `<biz>` routing node for `ButtonsMessage` and
+> `ListMessage`. This fork also emits the **full nested** node for
+> `TemplateMessage` and `InteractiveMessage`:
 >
-> ⚠️ **Emitting the correct node is necessary but may not be sufficient.** Field
-> testing (see [docs/interactive_messages_test_report.md](interactive_messages_test_report.md))
-> showed that a non-Business sender's buttons still do **not** render on a normal
-> recipient — even `ButtonsMessage`, which already had its node upstream, showed
-> "waiting for this message" and the others showed "your WhatsApp version is not
-> compatible". WhatsApp gates interactive-button **rendering** to official
-> WhatsApp Business API senders; this fork cannot lift that gating.
+> ```xml
+> <biz>
+>   <interactive type="native_flow" v="1">
+>     <native_flow name="..." v="2"/>
+>   </interactive>
+> </biz>
+> ```
 >
-> Historical note — before this patch, the three types below were inert (no
-> `<biz>` node at all). The original analysis read:
+> The patch is isolated in [`send_interactive_patch.go`](../send_interactive_patch.go)
+> with small guarded hooks in [`send.go`](../send.go) (`getButtonTypeFromMessage`,
+> `getButtonAttributes`, and the `<biz>` block in `getMessageContent`).
 >
-> 1. register the `TemplateMessage` / `InteractiveMessage` cases in
->    `getButtonTypeFromMessage`, and
-> 2. add the matching `native_flow` attributes in `getButtonAttributes`.
+> ✅ **Field test result (see [test report](interactive_messages_test_report.md)).**
+> With the nested node, `BuildInteractiveMessage` (native flow) **renders as real
+> clickable buttons** on a normal recipient and the tap comes back as a response
+> event — confirmed end-to-end. The **single-level** node (interactive with no
+> `native_flow` child) is rejected by the server with error 479, which is why the
+> grandchild is required.
 >
-> The exact patch is in
-> [If template / native-flow / carousel need to render reliably](#if-template--native-flow--carousel-need-to-render-reliably).
+> ⚠️ **Caveats from the same test:** the other types are weaker — `ListMessage`
+> tends to render as plain text, and `CarouselMessage` may still show "your
+> WhatsApp version is not compatible" on some clients. Prefer
+> `BuildInteractiveMessage` (native flow) for buttons that must render. And this
+> remains **experimental / ban-risk** — test only with disposable accounts.
 
 ## Usage
 
