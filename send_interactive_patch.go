@@ -7,6 +7,11 @@
 package whatsmeow
 
 import (
+	"context"
+	"encoding/hex"
+
+	"go.mau.fi/util/random"
+
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -118,17 +123,44 @@ func customInteractiveBizNode(msg *waE2E.Message) (*waBinary.Node, bool) {
 			"v":    nativeFlowVersion,
 		},
 	}
-	return &waBinary.Node{
-		Tag: "biz",
+	bizContent := []waBinary.Node{{
+		Tag: "interactive",
+		Attrs: waBinary.Attrs{
+			"type": "native_flow",
+			"v":    interactiveNodeVersion,
+		},
+		Content: []waBinary.Node{nativeFlow},
+	}}
+	// Carousel needs an extra <quality_control> sibling node inside <biz> for the
+	// recipient to render the cards (per the reference implementation). The bot
+	// node is still omitted for carousel (handled by relocateInteractiveBizAndAddBot
+	// via isCarouselOrCatalog).
+	if isCarouselMessage(unwrapped) {
+		bizContent = append(bizContent, qualityControlNode())
+	}
+	return &waBinary.Node{Tag: "biz", Content: bizContent}, true
+}
+
+// qualityControlNode builds the carousel quality-control node:
+//
+//	<quality_control decision_id="<20 random bytes, hex>">
+//	  <decision_source value="df"/>
+//	</quality_control>
+func qualityControlNode() waBinary.Node {
+	return waBinary.Node{
+		Tag:   "quality_control",
+		Attrs: waBinary.Attrs{"decision_id": hex.EncodeToString(random.Bytes(20))},
 		Content: []waBinary.Node{{
-			Tag: "interactive",
-			Attrs: waBinary.Attrs{
-				"type": "native_flow",
-				"v":    interactiveNodeVersion,
-			},
-			Content: []waBinary.Node{nativeFlow},
+			Tag:   "decision_source",
+			Attrs: waBinary.Attrs{"value": "df"},
 		}},
-	}, true
+	}
+}
+
+// isCarouselMessage reports whether the (already unwrapped) message is an
+// InteractiveMessage carousel.
+func isCarouselMessage(msg *waE2E.Message) bool {
+	return msg.GetInteractiveMessage().GetCarouselMessage() != nil
 }
 
 // unwrapForButtons peels the ViewOnce/Ephemeral wrappers the upstream button
@@ -265,4 +297,28 @@ func (cli *Client) relocateInteractiveBizAndAddBot(node *waBinary.Node, to types
 		}
 		cli.Log.Infof("Interactive stanza nodes for %s: biz=%s bot=%s", to, biz.String(), botStr)
 	}
+}
+
+// preferLIDForCarousel returns the LID the envelope should be addressed to for a
+// carousel sent to a phone-number JID, replicating the reference: prefer the LID
+// when a mapping exists, otherwise fall back (the caller keeps the normalized PN
+// — it never addresses to an empty JID). Returns EmptyJID when no LID is known.
+//
+// This addressing is needed for carousels to avoid a server error 400.
+func (cli *Client) preferLIDForCarousel(ctx context.Context, to types.JID) types.JID {
+	if cli == nil || to.Server != types.DefaultUserServer {
+		return types.EmptyJID
+	}
+	lid, err := cli.Store.LIDs.GetLIDForPN(ctx, to)
+	if err != nil {
+		cli.Log.Warnf("Carousel: failed to get LID for %s: %v (falling back to PN)", to, err)
+		return types.EmptyJID
+	}
+	if lid.IsEmpty() {
+		// Try a server lookup to populate the mapping; ignore failures (fall back).
+		if info, err := cli.GetUserInfo(ctx, []types.JID{to}); err == nil {
+			lid = info[to].LID
+		}
+	}
+	return lid
 }

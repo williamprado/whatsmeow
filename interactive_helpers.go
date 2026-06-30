@@ -53,6 +53,7 @@ const (
 	nativeFlowQuickReply = "quick_reply"
 	nativeFlowCTAURL     = "cta_url"
 	nativeFlowCTACall    = "cta_call"
+	nativeFlowCTACopy    = "cta_copy"
 )
 
 // interactiveMessageVersion is the messageVersion the clients expect on
@@ -229,6 +230,7 @@ type nativeFlowButtonParams struct {
 	URL         string `json:"url,omitempty"`
 	MerchantURL string `json:"merchant_url,omitempty"`
 	PhoneNumber string `json:"phone_number,omitempty"`
+	CopyCode    string `json:"copy_code,omitempty"`
 }
 
 func newNativeFlowButton(name string, params nativeFlowButtonParams) *waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton {
@@ -253,6 +255,12 @@ func NewURLNativeFlowButton(displayText, url string) *waE2E.InteractiveMessage_N
 // NewCallNativeFlowButton builds a native-flow button that dials a phone number.
 func NewCallNativeFlowButton(displayText, phoneNumber string) *waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton {
 	return newNativeFlowButton(nativeFlowCTACall, nativeFlowButtonParams{DisplayText: displayText, PhoneNumber: phoneNumber})
+}
+
+// NewCopyNativeFlowButton builds a native-flow button that copies a code to the
+// clipboard (cta_copy).
+func NewCopyNativeFlowButton(displayText, copyCode string) *waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton {
+	return newNativeFlowButton(nativeFlowCTACopy, nativeFlowButtonParams{DisplayText: displayText, CopyCode: copyCode})
 }
 
 // NewInteractiveHeaderText builds a text-only interactive header.
@@ -329,48 +337,4 @@ func newInteractiveMessage(body, footer string, header *waE2E.InteractiveMessage
 	return msg
 }
 
-// CarouselCard is a single card in a carousel. Header is an optional media/text
-// header, Body is the card text, Footer is optional small print and Buttons are
-// the card's native-flow buttons.
-type CarouselCard struct {
-	Header  *waE2E.InteractiveMessage_Header
-	Body    string
-	Footer  string
-	Buttons []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton
-}
-
-// BuildCarouselMessage builds a *waE2E.Message containing a carousel of
-// interactive cards. body is the introductory text shown above the carousel and
-// cards holds the individual cards (each rendered as a native-flow
-// InteractiveMessage).
-//
-// The optional cardType selects the carousel layout; if omitted it defaults to
-// HSCROLL_CARDS (horizontal scroll). Pass
-// waE2E.InteractiveMessage_CarouselMessage_ALBUM_IMAGE.Enum() to use the album
-// layout. Leaving the type unset would send UNKNOWN (the zero value), which makes
-// the carousel malformed and may stop it from rendering.
-//
-// Note: InteractiveMessage is not wrapped in a <biz>/native_flow node by the
-// current send core. See the file-level comment and PR notes.
-func BuildCarouselMessage(body string, cards []CarouselCard, cardType ...*waE2E.InteractiveMessage_CarouselMessage_CarouselCardType) *waE2E.Message {
-	protoCards := make([]*waE2E.InteractiveMessage, len(cards))
-	for i, card := range cards {
-		protoCards[i] = newInteractiveMessage(card.Body, card.Footer, card.Header, card.Buttons)
-	}
-	resolvedType := waE2E.InteractiveMessage_CarouselMessage_HSCROLL_CARDS.Enum()
-	if len(cardType) > 0 && cardType[0] != nil {
-		resolvedType = cardType[0]
-	}
-	return &waE2E.Message{
-		InteractiveMessage: &waE2E.InteractiveMessage{
-			Body: &waE2E.InteractiveMessage_Body{Text: proto.String(body)},
-			InteractiveMessage: &waE2E.InteractiveMessage_CarouselMessage_{
-				CarouselMessage: &waE2E.InteractiveMessage_CarouselMessage{
-					Cards:            protoCards,
-					MessageVersion:   proto.Int32(interactiveMessageVersion),
-					CarouselCardType: resolvedType,
-				},
-			},
-		},
-	}
-}
+// CarouselCard and BuildCarouselMessage live in interactive_carousel.go.

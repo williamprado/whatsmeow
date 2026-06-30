@@ -292,6 +292,19 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 		}
 	}
 
+	// --- CUSTOM FORK PATCH (carousel) — see send_interactive_patch.go ---
+	// Address carousel envelopes to the recipient's LID when a mapping exists
+	// (the reference does this to avoid server error 400). Falls back to the
+	// normalized PN; never addresses to an empty JID.
+	if !req.Peer && to.Server == types.DefaultUserServer && isCarouselMessage(unwrapForButtons(message)) {
+		if lid := cli.preferLIDForCarousel(ctx, to); !lid.IsEmpty() {
+			cli.Log.Debugf("Carousel: addressing envelope to LID %s (was %s)", lid, to)
+			to = lid
+			ownID = cli.getOwnLID()
+		}
+	}
+	// --- END CUSTOM FORK PATCH ---
+
 	var groupParticipants []types.JID
 	if to.Server == types.GroupServer || to.Server == types.BroadcastServer {
 		start := time.Now()
