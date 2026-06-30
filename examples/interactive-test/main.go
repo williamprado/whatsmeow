@@ -39,9 +39,7 @@ import (
 	"image/draw"
 	"image/png"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -263,37 +261,14 @@ func makePNG(w, h int, c color.Color) []byte {
 	return buf.Bytes()
 }
 
-func urlReplyButtons(buyURL, pickID string) []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton {
-	return []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-		whatsmeow.NewURLNativeFlowButton("Buy", buyURL),
-		whatsmeow.NewQuickReplyNativeFlowButton("Pick", pickID),
+// logNativeFlowButtons prints the native-flow buttons (name + buttonParamsJSON)
+// of a non-carousel interactive message, for auditing.
+func logNativeFlowButtons(label string, msg *waE2E.Message) {
+	nf := msg.GetInteractiveMessage().GetNativeFlowMessage()
+	fmt.Printf("%s: %d buttons\n", label, len(nf.GetButtons()))
+	for _, b := range nf.GetButtons() {
+		fmt.Printf("  button name=%s params=%s\n", b.GetName(), b.GetButtonParamsJSON())
 	}
-}
-
-// makeTestVideo uses ffmpeg to generate a small MP4 plus a JPEG thumbnail and
-// returns them with the (known) dimensions/duration. Requires ffmpeg on PATH.
-func makeTestVideo() (data, thumb []byte, w, h, secs uint32, err error) {
-	dir, err := os.MkdirTemp("", "carousel-vid")
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	defer os.RemoveAll(dir)
-	vp := filepath.Join(dir, "card.mp4")
-	tp := filepath.Join(dir, "thumb.jpg")
-	if e := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=3",
-		"-pix_fmt", "yuv420p", "-movflags", "+faststart", vp).Run(); e != nil {
-		return nil, nil, 0, 0, 0, fmt.Errorf("ffmpeg generate video: %w", e)
-	}
-	if e := exec.Command("ffmpeg", "-y", "-i", vp, "-frames:v", "1", "-q:v", "3", tp).Run(); e != nil {
-		return nil, nil, 0, 0, 0, fmt.Errorf("ffmpeg thumbnail: %w", e)
-	}
-	if data, err = os.ReadFile(vp); err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	if thumb, err = os.ReadFile(tp); err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	return data, thumb, 320, 240, 3, nil
 }
 
 // logCarousel prints the carouselMessage content for auditing, including the top
@@ -330,49 +305,56 @@ func sendAll(ctx context.Context, client *whatsmeow.Client, to types.JID) {
 		},
 	}
 
-	// Carousel A: a top media header (image) + 2 image cards.
-	topImg, errTop := client.UploadCarouselImage(ctx, makePNG(800, 300, color.RGBA{R: 0x0f, G: 0x17, B: 0x2a, A: 255}))
-	imgA, errA := client.UploadCarouselImage(ctx, makePNG(600, 400, color.RGBA{R: 0x25, G: 0x63, B: 0xeb, A: 255}))
-	imgB, errB := client.UploadCarouselImage(ctx, makePNG(600, 400, color.RGBA{R: 0x16, G: 0xa3, B: 0x4a, A: 255}))
-	if errTop != nil || errA != nil || errB != nil {
-		fmt.Printf("⚠️  image upload failed (top=%v A=%v B=%v) — skipping carousel A\n", errTop, errA, errB)
-	} else {
-		carA, err := whatsmeow.BuildCarouselMessageWithOptions(whatsmeow.CarouselOptions{
-			Title: "Our plans", Body: "Swipe to compare", Footer: "interactive-test",
-			HeaderImage: topImg,
-			Cards: []whatsmeow.CarouselCard{
-				{Title: "Plan A", Body: "Starter plan", Footer: "best for individuals", Image: imgA, Buttons: urlReplyButtons("https://example.com/a", "card-a")},
-				{Title: "Plan B", Body: "Pro plan", Footer: "best for teams", Image: imgB, Buttons: urlReplyButtons("https://example.com/b", "card-b")},
-			},
-		})
-		if err != nil {
-			fmt.Printf("❌ build carousel A: %v\n", err)
-		} else {
-			logCarousel("Carousel A (top media header + 2 image cards)", carA)
-			messages = append(messages, testMessage{label: "Carousel A (top media header + 2 image cards)", msg: carA})
-		}
-	}
+	pixKey := "pix@kesassessoria.com.br"
 
-	// Carousel B: a video card + an image card.
-	vidData, vidThumb, vw, vh, vsecs, verr := makeTestVideo()
-	imgC, errC := client.UploadCarouselImage(ctx, makePNG(600, 400, color.RGBA{R: 0x7c, G: 0x3a, B: 0xed, A: 255}))
-	if verr != nil || errC != nil {
-		fmt.Printf("⚠️  video/image prep failed (video=%v image=%v) — skipping carousel B\n", verr, errC)
-	} else if vidMsg, err := client.UploadCarouselVideo(ctx, whatsmeow.CarouselVideo{
-		Data: vidData, JPEGThumbnail: vidThumb, Width: vw, Height: vh, Seconds: vsecs,
-	}); err != nil {
-		fmt.Printf("⚠️  video upload failed: %v — skipping carousel B\n", err)
+	// Pix copy-key (cta_copy) + a quick_reply.
+	pixCopyMsg := whatsmeow.BuildInteractiveMessage("Pague via Pix copiando a chave abaixo", "interactive-test",
+		whatsmeow.NewInteractiveHeaderText("Pagamento Pix", ""),
+		[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+			whatsmeow.NewPixCopyKeyButton("Copiar chave Pix", pixKey),
+			whatsmeow.NewQuickReplyNativeFlowButton("Já paguei", "pix-paid"),
+		})
+	logNativeFlowButtons("Pix copy-key (cta_copy)", pixCopyMsg)
+	messages = append(messages, testMessage{label: "Pix copy-key (cta_copy)", msg: pixCopyMsg})
+
+	// Pix native payment (review_and_pay / payment_info) — EXPERIMENTAL, plus a
+	// cta_url fallback to a charge link.
+	pixPayMsg := whatsmeow.BuildInteractiveMessage("Pague R$10,00 com Pix", "interactive-test",
+		whatsmeow.NewInteractiveHeaderText("Pix com valor", ""),
+		[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+			whatsmeow.NewPixPaymentButton(whatsmeow.PixPayment{
+				DisplayText: "Pagar com Pix", AmountCents: 1000, PixKey: pixKey,
+				KeyType: "EMAIL", MerchantName: "Kes Assessoria", ReferenceID: "test-order-1",
+			}),
+			whatsmeow.NewPixPaymentLinkButton("Abrir cobrança", "https://example.com/pix/charge"),
+		})
+	logNativeFlowButtons("Pix payment (review_and_pay/payment_info)", pixPayMsg)
+	messages = append(messages, testMessage{label: "Pix payment (review_and_pay, experimental)", msg: pixPayMsg})
+
+	// Carousel with cta_call and cta_copy cards.
+	imgCall, errA := client.UploadCarouselImage(ctx, makePNG(600, 400, color.RGBA{R: 0x25, G: 0x63, B: 0xeb, A: 255}))
+	imgCopy, errB := client.UploadCarouselImage(ctx, makePNG(600, 400, color.RGBA{R: 0x16, G: 0xa3, B: 0x4a, A: 255}))
+	if errA != nil || errB != nil {
+		fmt.Printf("⚠️  image upload failed (call=%v copy=%v) — skipping CTA carousel\n", errA, errB)
 	} else {
-		carB, err := whatsmeow.BuildCarouselMessage("Media mix", "Video + image cards", "interactive-test",
+		carCTA, err := whatsmeow.BuildCarouselMessage("Fale conosco / Pague", "Swipe between options", "interactive-test",
 			[]whatsmeow.CarouselCard{
-				{Title: "Video card", Body: "A short clip", Footer: "plays inline", Video: vidMsg, Buttons: urlReplyButtons("https://example.com/v", "card-v")},
-				{Title: "Image card", Body: "Static image", Footer: "no media playback", Image: imgC, Buttons: urlReplyButtons("https://example.com/i", "card-i")},
+				{Title: "Ligar", Body: "Suporte por telefone", Footer: "atendimento", Image: imgCall,
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						whatsmeow.NewCallNativeFlowButton("Ligar agora", "+5577998020125"),
+						whatsmeow.NewQuickReplyNativeFlowButton("Prefiro chat", "call-chat"),
+					}},
+				{Title: "Copiar Pix", Body: "Chave Pix do vendedor", Footer: "copia e cola", Image: imgCopy,
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						whatsmeow.NewPixCopyKeyButton("Copiar chave", pixKey),
+						whatsmeow.NewQuickReplyNativeFlowButton("Já paguei", "carousel-paid"),
+					}},
 			})
 		if err != nil {
-			fmt.Printf("❌ build carousel B: %v\n", err)
+			fmt.Printf("❌ build CTA carousel: %v\n", err)
 		} else {
-			logCarousel("Carousel B (video card + image card)", carB)
-			messages = append(messages, testMessage{label: "Carousel B (video card + image card)", msg: carB})
+			logCarousel("Carousel (cta_call + cta_copy cards)", carCTA)
+			messages = append(messages, testMessage{label: "Carousel (cta_call + cta_copy cards)", msg: carCTA})
 		}
 	}
 
