@@ -883,6 +883,12 @@ func (cli *Client) sendDM(
 		})
 	}
 
+	// --- CUSTOM FORK PATCH (interactive buttons) — see send_interactive_patch.go ---
+	// Move <biz> to the end (after <tctoken>) and append <bot biz_bot="1"/> for
+	// private 1:1 interactive messages, matching the reference stanza ordering.
+	cli.relocateInteractiveBizAndAddBot(node, to, message)
+	// --- END CUSTOM FORK PATCH ---
+
 	start = time.Now()
 	data, err := cli.sendNodeAndGetData(ctx, *node)
 	timings.Send = time.Since(start)

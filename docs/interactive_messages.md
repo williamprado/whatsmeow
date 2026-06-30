@@ -43,7 +43,19 @@ for what the last column means.
 >
 > The patch is isolated in [`send_interactive_patch.go`](../send_interactive_patch.go)
 > with small guarded hooks in [`send.go`](../send.go) (`getButtonTypeFromMessage`,
-> `getButtonAttributes`, and the `<biz>` block in `getMessageContent`).
+> `getButtonAttributes`, the `<biz>` block in `getMessageContent`, and a relocate
+> hook in `sendDM`).
+>
+> **`<bot biz_bot="1"/>` node (added).** Matching the reference Baileys
+> implementation (rsalcara/InfiniteAPI), for **private 1:1** interactive messages
+> the patch now appends a `<bot biz_bot="1"/>` node immediately after `<biz>`, and
+> relocates both to the end of the stanza so the order is
+> `device-identity → tctoken → biz → bot`. The bot node is what makes **lists and
+> CTA-only** buttons render on Web/Desktop. It is injected for quick_reply / CTA /
+> list, and **skipped for carousel and catalog**. The inner `<native_flow>` uses
+> `v="9"` (not `2`) and a `name` from the reference map (`payment_info`, `mpm`,
+> `order_details`, else `mixed`). The emitted `biz`/`bot` subtree is logged at
+> INFO for auditing. **Still experimental — see the ban-risk warning above.**
 >
 > ✅ **Field test result (see [test report](interactive_messages_test_report.md)).**
 > With the nested node, `BuildInteractiveMessage` (native flow) **renders as real
