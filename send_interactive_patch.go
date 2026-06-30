@@ -9,6 +9,7 @@ package whatsmeow
 import (
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // ============================================================================
@@ -45,6 +46,12 @@ import (
 
 // interactiveNodeVersion is the "v" attribute on the <interactive> routing node.
 const interactiveNodeVersion = "1"
+
+// nativeFlowVersion is the "v" attribute on the inner <native_flow> node. This
+// matches the value the reference Baileys implementation (rsalcara/InfiniteAPI,
+// src/Socket/messages-send.ts) sends; "9" — not "2" — is required for the
+// recipient's Web/Desktop client to render lists and CTA-only buttons.
+const nativeFlowVersion = "9"
 
 // customButtonType returns the <biz> child tag for the interactive message types
 // that upstream getButtonTypeFromMessage does not handle. The bool is false when
@@ -90,7 +97,7 @@ func customButtonAttributes(msg *waE2E.Message) (waBinary.Attrs, bool) {
 //
 //	<biz>
 //	  <interactive type="native_flow" v="1">
-//	    <native_flow name="..." v="2"/>
+//	    <native_flow name="..." v="9"/>
 //	  </interactive>
 //	</biz>
 //
@@ -108,7 +115,7 @@ func customInteractiveBizNode(msg *waE2E.Message) (*waBinary.Node, bool) {
 		Tag: "native_flow",
 		Attrs: waBinary.Attrs{
 			"name": nativeFlowName(unwrapped),
-			"v":    "2",
+			"v":    nativeFlowVersion,
 		},
 	}
 	return &waBinary.Node{
@@ -139,18 +146,123 @@ func unwrapForButtons(msg *waE2E.Message) *waE2E.Message {
 	}
 }
 
-// nativeFlowName returns the <native_flow> "name" attribute. If every native
-// flow button shares one name it is used; otherwise "mixed".
+// nativeFlowName returns the <native_flow> "name" attribute, matching the map
+// used by the reference Baileys implementation (rsalcara/InfiniteAPI). Only a
+// few special flows get a dedicated name; everything else (including plain
+// quick_reply and cta_url buttons) is "mixed". The name is NOT inferred from the
+// first button outside this map.
+//
+//	review_and_pay / payment_info -> payment_info
+//	mpm                           -> mpm
+//	review_order                  -> order_details
+//	(anything else)               -> mixed
 func nativeFlowName(msg *waE2E.Message) string {
 	nf := msg.GetInteractiveMessage().GetNativeFlowMessage()
-	if nf == nil || len(nf.GetButtons()) == 0 {
-		return "mixed"
-	}
-	name := nf.GetButtons()[0].GetName()
-	for _, b := range nf.GetButtons()[1:] {
-		if b.GetName() != name {
-			return "mixed"
+	for _, b := range nf.GetButtons() {
+		switch b.GetName() {
+		case "review_and_pay", "payment_info":
+			return "payment_info"
+		case "mpm":
+			return "mpm"
+		case "review_order":
+			return "order_details"
 		}
 	}
-	return name
+	return "mixed"
+}
+
+// ============================================================================
+// CUSTOM FORK PATCH — <bot biz_bot="1"/> node for private 1:1 interactive msgs
+// ============================================================================
+//
+// The reference Baileys implementation (rsalcara/InfiniteAPI,
+// src/Socket/messages-send.ts) appends, for private 1:1 interactive messages,
+// TWO cleartext nodes at the very end of the stanza, in this order:
+//
+//	... -> device-identity -> tctoken -> biz -> bot
+//
+// where <bot biz_bot="1"/> follows the <biz> node. Per the comment in that
+// implementation, the bot node is currently REQUIRED for CTA-only and list
+// messages to render on Web/Desktop. It is injected for every private 1:1
+// interactive message (quick_reply, CTA, list) EXCEPT carousel and catalog.
+//
+// whatsmeow builds the <biz> node inside getMessageContent, which runs BEFORE
+// the tctoken is appended in sendDM — so by default <biz> ends up before
+// <tctoken>. relocateInteractiveBizAndAddBot (called from sendDM after the
+// tctoken block) moves <biz> to the end and appends <bot> right after it, so the
+// final ordering matches the reference exactly.
+
+// isPrivateInteractiveRecipient reports whether `to` is a 1:1 user JID
+// (phone number / LID / legacy @c.us) — the only recipients that get the bot
+// node. Groups, newsletters, broadcast/status are excluded.
+func isPrivateInteractiveRecipient(to types.JID) bool {
+	switch to.Server {
+	case types.DefaultUserServer, types.HiddenUserServer, types.LegacyUserServer:
+		return true
+	default:
+		return false
+	}
+}
+
+// isCarouselOrCatalog reports whether the (unwrapped) message is a carousel or
+// catalog/shop/product interactive message — the reference excludes these from
+// the bot node.
+func isCarouselOrCatalog(msg *waE2E.Message) bool {
+	m := unwrapForButtons(msg)
+	if im := m.GetInteractiveMessage(); im != nil {
+		if im.GetCarouselMessage() != nil ||
+			im.GetShopStorefrontMessage() != nil ||
+			im.GetCollectionMessage() != nil {
+			return true
+		}
+	}
+	return m.GetProductMessage() != nil
+}
+
+// relocateInteractiveBizAndAddBot moves the <biz> child that getMessageContent
+// appended to the end of the stanza (so it lands after <tctoken>) and, unless
+// the message is a carousel/catalog, appends a <bot biz_bot="1"/> node right
+// after it. It is a no-op for non-1:1 recipients and non-interactive messages.
+//
+// Called from sendDM after the tctoken/cstoken block. The final biz/bot subtree
+// is logged at debug level for auditing.
+func (cli *Client) relocateInteractiveBizAndAddBot(node *waBinary.Node, to types.JID, msg *waE2E.Message) {
+	if node == nil || !isPrivateInteractiveRecipient(to) {
+		return
+	}
+	if getButtonTypeFromMessage(msg) == "" {
+		return // not an interactive/button message
+	}
+	children := node.GetChildren()
+	newContent := make([]waBinary.Node, 0, len(children)+1)
+	var biz *waBinary.Node
+	for i := range children {
+		if biz == nil && children[i].Tag == "biz" {
+			b := children[i]
+			biz = &b
+			continue
+		}
+		newContent = append(newContent, children[i])
+	}
+	if biz == nil {
+		// No <biz> node was built (shouldn't happen for interactive types); leave
+		// the stanza untouched rather than emit a lone <bot>.
+		return
+	}
+	newContent = append(newContent, *biz)
+	var bot *waBinary.Node
+	if !isCarouselOrCatalog(msg) {
+		bot = &waBinary.Node{Tag: "bot", Attrs: waBinary.Attrs{"biz_bot": "1"}}
+		newContent = append(newContent, *bot)
+	}
+	node.Content = newContent
+
+	// Audit log of the cleartext interactive routing nodes that were emitted.
+	if cli != nil && cli.Log != nil {
+		botStr := "<none>"
+		if bot != nil {
+			botStr = bot.String()
+		}
+		cli.Log.Infof("Interactive stanza nodes for %s: biz=%s bot=%s", to, biz.String(), botStr)
+	}
 }
