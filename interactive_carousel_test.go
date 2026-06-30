@@ -7,7 +7,12 @@
 package whatsmeow
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"testing"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -154,6 +159,82 @@ func TestNonCarouselBizNodeHasNoQualityControl(t *testing.T) {
 		if ch.Tag == "quality_control" {
 			t.Error("non-carousel biz node must not have quality_control")
 		}
+	}
+}
+
+func TestCarouselTopMediaHeader(t *testing.T) {
+	// Without top media: header has no media, hasMediaAttachment=false.
+	plain, err := BuildCarouselMessage("t", "b", "", twoValidCards())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph := plain.GetInteractiveMessage().GetHeader()
+	if ph.GetHasMediaAttachment() || ph.GetImageMessage() != nil || ph.GetVideoMessage() != nil {
+		t.Error("plain carousel top header should have no media")
+	}
+
+	// With top image media: header carries it, hasMediaAttachment=true.
+	withImg, err := BuildCarouselMessageWithOptions(CarouselOptions{
+		Title: "t", Body: "b", HeaderImage: &waE2E.ImageMessage{}, Cards: twoValidCards(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := withImg.GetInteractiveMessage().GetHeader()
+	if !h.GetHasMediaAttachment() || h.GetImageMessage() == nil {
+		t.Error("top header should carry the image with hasMediaAttachment=true")
+	}
+
+	// With top video media.
+	withVid, err := BuildCarouselMessageWithOptions(CarouselOptions{
+		Title: "t", Body: "b", HeaderVideo: &waE2E.VideoMessage{}, Cards: twoValidCards(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withVid.GetInteractiveMessage().GetHeader().GetVideoMessage() == nil {
+		t.Error("top header should carry the video")
+	}
+}
+
+func TestCarouselTopHeaderMediaExclusive(t *testing.T) {
+	_, err := BuildCarouselMessageWithOptions(CarouselOptions{
+		Title: "t", Body: "b", HeaderImage: &waE2E.ImageMessage{}, HeaderVideo: &waE2E.VideoMessage{},
+		Cards: twoValidCards(),
+	})
+	if err == nil {
+		t.Error("expected error when top header has both image and video")
+	}
+}
+
+func TestUploadCarouselVideoValidation(t *testing.T) {
+	// These validations run before cli.Upload, so a nil client is fine.
+	if _, err := (*Client)(nil).UploadCarouselVideo(context.Background(), CarouselVideo{}); err == nil {
+		t.Error("expected error for empty video data")
+	}
+	if _, err := (*Client)(nil).UploadCarouselVideo(context.Background(), CarouselVideo{Data: []byte("x")}); err == nil {
+		t.Error("expected error for missing thumbnail")
+	}
+}
+
+func TestJPEGThumbnail(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 600, 400))
+	for y := 0; y < 400; y++ {
+		for x := 0; x < 600; x++ {
+			src.Set(x, y, color.RGBA{R: uint8(x % 256), G: uint8(y % 256), B: 0x80, A: 255})
+		}
+	}
+	thumb := jpegThumbnail(src, carouselThumbnailMaxDim)
+	if len(thumb) == 0 {
+		t.Fatal("thumbnail is empty")
+	}
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(thumb))
+	if err != nil {
+		t.Fatalf("thumbnail is not valid JPEG: %v", err)
+	}
+	// Downscaled so the longest side fits maxDim (landscape -> width capped).
+	if cfg.Width != carouselThumbnailMaxDim || cfg.Width > 600 || cfg.Height > 400 {
+		t.Errorf("thumbnail size = %dx%d, want width %d", cfg.Width, cfg.Height, carouselThumbnailMaxDim)
 	}
 }
 
