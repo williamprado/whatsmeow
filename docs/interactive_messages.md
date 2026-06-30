@@ -230,36 +230,59 @@ header := whatsmeow.NewInteractiveHeaderImage(imageMessage, "Title", "Subtitle")
 
 ### Carousel (`InteractiveMessage` + `CarouselMessage`)
 
-> 🩹 **Fork patch applies the `<biz>`/native_flow routing node** for this type (see the [fork patch note](#interactive-button-message-helpers) above). Note: emitting the node does not guarantee the recipient renders buttons — WhatsApp gates that to official Business senders.
+> 🎠 **Native-flow carousel with `quality_control` and NO bot node.** The carousel
+> is sent as the **root** `InteractiveMessage` (NOT wrapped in ViewOnce, unlike the
+> list). The core patch adds, **only for carousel**, a `<quality_control>` node
+> inside `<biz>` next to `interactive>native_flow` — this is what the reference
+> indicates is required for the cards to render:
+>
+> ```xml
+> <biz>
+>   <interactive type="native_flow" v="1"><native_flow name="mixed" v="9"/></interactive>
+>   <quality_control decision_id="<20 random bytes, hex>"><decision_source value="df"/></quality_control>
+> </biz>
+> ```
+>
+> The `<bot biz_bot="1"/>` node is **omitted** for carousel (and catalog). The
+> envelope is also addressed to the recipient's **LID** when a mapping exists
+> (falling back to the normalized PN) to avoid server error 400.
 
-Each card is its own native-flow interactive message, optionally with a media
-header. The carousel layout defaults to `HSCROLL_CARDS`; pass an optional last
-argument to override it:
+`BuildCarouselMessage(title, body, footer, cards)` returns an error if the limits
+are exceeded: 2–10 cards, each card needs at least one button, and a card may not
+set both `Image` and `Video`. Card media must be an already-uploaded
+`*waE2E.ImageMessage` / `*waE2E.VideoMessage` (see `examples/interactive-test`
+for the upload helper).
 
 ```go
-msg := whatsmeow.BuildCarouselMessage("Check out our deals", cards,
-    waE2E.InteractiveMessage_CarouselMessage_ALBUM_IMAGE.Enum())
+msg, err := whatsmeow.BuildCarouselMessage(
+    "Our plans",          // top header title
+    "Swipe to compare",   // top body
+    "Footer",             // top footer ("" to omit)
+    []whatsmeow.CarouselCard{
+        {
+            Title: "Plan A", Body: "Starter plan", Footer: "best for individuals",
+            Image: planAImage, // uploaded *waE2E.ImageMessage
+            Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+                whatsmeow.NewURLNativeFlowButton("Buy A", "https://example.com/a"),
+                whatsmeow.NewQuickReplyNativeFlowButton("Pick A", "card-a"),
+            },
+        },
+        {
+            Title: "Plan B", Body: "Pro plan", Footer: "best for teams",
+            Image: planBImage,
+            Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+                whatsmeow.NewURLNativeFlowButton("Buy B", "https://example.com/b"),
+                whatsmeow.NewQuickReplyNativeFlowButton("Pick B", "card-b"),
+            },
+        },
+    },
+)
 ```
 
-```go
-msg := whatsmeow.BuildCarouselMessage("Check out our deals", []whatsmeow.CarouselCard{
-    {
-        Header: whatsmeow.NewInteractiveHeaderImage(card1Image, "Plan A", ""),
-        Body:   "Our starter plan",
-        Footer: "Best for individuals",
-        Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-            whatsmeow.NewURLNativeFlowButton("Buy Plan A", "https://example.com/a"),
-        },
-    },
-    {
-        Header: whatsmeow.NewInteractiveHeaderImage(card2Image, "Plan B", ""),
-        Body:   "Our pro plan",
-        Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-            whatsmeow.NewURLNativeFlowButton("Buy Plan B", "https://example.com/b"),
-        },
-    },
-})
-```
+Card buttons follow the reference mapping: `NewURLNativeFlowButton` → `cta_url`
+(`{display_text, url, merchant_url}`), `NewCopyNativeFlowButton` → `cta_copy`
+(`{display_text, copy_code}`), `NewQuickReplyNativeFlowButton` → `quick_reply`
+(`{display_text, id}`), `NewCallNativeFlowButton` → `cta_call`.
 
 ## How the binary button nodes are built
 

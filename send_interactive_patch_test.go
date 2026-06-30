@@ -21,6 +21,23 @@ import (
 // not handle, plus a regression guard that ButtonsMessage/ListMessage are
 // unchanged.
 
+// sampleCarousel builds a minimal valid 2-card carousel for tests.
+func sampleCarousel(t *testing.T) *waE2E.Message {
+	t.Helper()
+	msg, err := BuildCarouselMessage("title", "intro", "", []CarouselCard{
+		{Title: "Card 1", Body: "b1", Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+			NewURLNativeFlowButton("Buy", "https://example.com/1"),
+		}},
+		{Title: "Card 2", Body: "b2", Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+			NewQuickReplyNativeFlowButton("Pick", "pick-2"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("sampleCarousel: %v", err)
+	}
+	return msg
+}
+
 func TestButtonTypeForInteractiveTypes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -28,7 +45,7 @@ func TestButtonTypeForInteractiveTypes(t *testing.T) {
 		want string
 	}{
 		{"interactive native flow", BuildInteractiveMessage("b", "", nil, nil), "interactive"},
-		{"carousel", BuildCarouselMessage("b", []CarouselCard{{Body: "c"}}), "interactive"},
+		{"carousel", sampleCarousel(t), "interactive"},
 		{"template", BuildTemplateMessage("b", "", []*waE2E.HydratedTemplateButton{
 			NewQuickReplyTemplateButton("x", "y"),
 		}), "interactive"},
@@ -55,7 +72,7 @@ func TestButtonAttributesForInteractive(t *testing.T) {
 	}
 
 	// Carousel rides the same native_flow routing node.
-	carouselAttrs := getButtonAttributes(BuildCarouselMessage("b", []CarouselCard{{Body: "c"}}))
+	carouselAttrs := getButtonAttributes(sampleCarousel(t))
 	if carouselAttrs["type"] != "native_flow" {
 		t.Errorf("carousel type = %v, want native_flow", carouselAttrs["type"])
 	}
@@ -166,7 +183,7 @@ func TestRelocateBizAndAddBotForList(t *testing.T) {
 }
 
 func TestRelocateNoBotForCarousel(t *testing.T) {
-	msg := BuildCarouselMessage("b", []CarouselCard{{Body: "c"}})
+	msg := sampleCarousel(t)
 	node := &waBinary.Node{Tag: "message", Content: []waBinary.Node{
 		{Tag: "biz", Content: []waBinary.Node{{Tag: "interactive"}}},
 		{Tag: "tctoken"},

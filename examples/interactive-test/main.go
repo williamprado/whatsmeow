@@ -29,10 +29,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"os"
 	"os/signal"
 	"strings"
@@ -247,72 +252,78 @@ type testMessage struct {
 	msg   *waE2E.Message
 }
 
-func sampleListSections() []whatsmeow.ListSection {
-	return []whatsmeow.ListSection{
-		{Title: "Section A", Rows: []whatsmeow.ListRow{
-			{Title: "A1", Description: "first", RowID: "a1"},
-			{Title: "A2", RowID: "a2"},
-		}},
-		{Title: "Section B", Rows: []whatsmeow.ListRow{
-			{Title: "B1", RowID: "b1"},
-		}},
+// makePNG renders a solid-color PNG in memory (no external asset needed).
+func makePNG(w, h int, c color.Color) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: c}, image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return buf.Bytes()
+}
+
+// uploadSampleImage uploads a generated PNG and builds the *waE2E.ImageMessage
+// for use as a carousel card header.
+func uploadSampleImage(ctx context.Context, client *whatsmeow.Client, w, h int, c color.Color) (*waE2E.ImageMessage, error) {
+	data := makePNG(w, h, c)
+	up, err := client.Upload(ctx, data, whatsmeow.MediaImage)
+	if err != nil {
+		return nil, err
 	}
+	return &waE2E.ImageMessage{
+		URL:           proto.String(up.URL),
+		DirectPath:    proto.String(up.DirectPath),
+		MediaKey:      up.MediaKey,
+		FileEncSHA256: up.FileEncSHA256,
+		FileSHA256:    up.FileSHA256,
+		FileLength:    proto.Uint64(up.FileLength),
+		Mimetype:      proto.String("image/png"),
+		Width:         proto.Uint32(uint32(w)),
+		Height:        proto.Uint32(uint32(h)),
+	}, nil
 }
 
 func sendAll(ctx context.Context, client *whatsmeow.Client, to types.JID) {
-	// Native-flow single_select list (the renderable replacement for the legacy
-	// ListMessage). Wrapped in ViewOnce; routed via biz/bot by the core patch.
-	nfList, err := whatsmeow.BuildNativeFlowListMessage(
-		"Open menu", "Native-flow list: pick one", "interactive-test",
-		whatsmeow.NewInteractiveHeaderText("Menu", ""),
-		sampleListSections(),
-	)
-	if err != nil {
-		fmt.Printf("❌ failed to build native-flow list: %v\n", err)
-		return
-	}
-	// Audit log of the single_select buttonParamsJSON.
-	if im := nfList.GetViewOnceMessage().GetMessage().GetInteractiveMessage(); im != nil {
-		if btns := im.GetNativeFlowMessage().GetButtons(); len(btns) > 0 {
-			fmt.Printf("native_flow list buttonParamsJSON: %s\n", btns[0].GetButtonParamsJSON())
-		}
-	}
-
 	messages := []testMessage{
 		{
 			label: "ControlText (plain text)",
 			msg:   &waE2E.Message{Conversation: proto.String("Control: plain text from interactive-test")},
 		},
-		{
-			// Legacy ListMessage — sent for direct comparison; expected to be
-			// dropped by the recipient (see PR #2 report).
-			label: "LegacyListMessage (expected dropped)",
-			msg:   whatsmeow.BuildListMessage("Legacy list", "Pick something", "Open legacy list", "interactive-test", sampleListSections()),
-		},
-		{
-			label: "NativeFlowList (single_select)",
-			msg:   nfList,
-		},
-		{
-			label: "NativeFlowQuickReply (quick_reply)",
-			msg: whatsmeow.BuildNativeFlowQuickReplyMessage("Native-flow quick replies", "interactive-test",
-				whatsmeow.NewInteractiveHeaderText("Choose", ""),
-				[]whatsmeow.QuickReplyButton{
-					{ID: "nfqr-yes", DisplayText: "Yes"},
-					{ID: "nfqr-no", DisplayText: "No"},
-					{ID: "nfqr-maybe", DisplayText: "Maybe"},
-				}),
-		},
-		{
-			// Known-good baseline native flow (quick_reply + CTA url).
-			label: "InteractiveMessage native flow (baseline Yes/Site)",
-			msg: whatsmeow.BuildInteractiveMessage("Baseline native flow", "interactive-test",
-				whatsmeow.NewInteractiveHeaderText("Header", "Subtitle"),
-				[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-					whatsmeow.NewQuickReplyNativeFlowButton("Yes", "nf-yes"),
-					whatsmeow.NewURLNativeFlowButton("Site", "https://example.com"),
-				}),
-		},
+	}
+
+	// Carousel: 2 cards, each with an uploaded image + cta_url and quick_reply
+	// buttons. Built as a native-flow carousel (biz>interactive>native_flow +
+	// quality_control, no bot node, LID addressing) by the core patch.
+	imgA, errA := uploadSampleImage(ctx, client, 600, 400, color.RGBA{R: 0x25, G: 0x63, B: 0xeb, A: 255})
+	imgB, errB := uploadSampleImage(ctx, client, 600, 400, color.RGBA{R: 0x16, G: 0xa3, B: 0x4a, A: 255})
+	if errA != nil || errB != nil {
+		fmt.Printf("⚠️  carousel image upload failed (A=%v B=%v) — skipping carousel\n", errA, errB)
+	} else {
+		carousel, err := whatsmeow.BuildCarouselMessage("Our plans", "Swipe to compare", "interactive-test",
+			[]whatsmeow.CarouselCard{
+				{Title: "Plan A", Body: "Starter plan", Footer: "best for individuals", Image: imgA,
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						whatsmeow.NewURLNativeFlowButton("Buy A", "https://example.com/a"),
+						whatsmeow.NewQuickReplyNativeFlowButton("Pick A", "card-a"),
+					}},
+				{Title: "Plan B", Body: "Pro plan", Footer: "best for teams", Image: imgB,
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						whatsmeow.NewURLNativeFlowButton("Buy B", "https://example.com/b"),
+						whatsmeow.NewQuickReplyNativeFlowButton("Pick B", "card-b"),
+					}},
+			})
+		if err != nil {
+			fmt.Printf("❌ failed to build carousel: %v\n", err)
+		} else {
+			// Audit log of the carouselMessage content.
+			cm := carousel.GetInteractiveMessage().GetCarouselMessage()
+			fmt.Printf("carouselMessage: %d cards, messageVersion=%d\n", len(cm.GetCards()), cm.GetMessageVersion())
+			for i, card := range cm.GetCards() {
+				for _, b := range card.GetNativeFlowMessage().GetButtons() {
+					fmt.Printf("  card %d: button name=%s params=%s\n", i, b.GetName(), b.GetButtonParamsJSON())
+				}
+			}
+			messages = append(messages, testMessage{label: "Carousel (2 cards, image + cta_url/quick_reply)", msg: carousel})
+		}
 	}
 
 	for _, tm := range messages {
