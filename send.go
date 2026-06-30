@@ -981,6 +981,11 @@ func getMediaTypeFromMessage(msg *waE2E.Message) string {
 }
 
 func getButtonTypeFromMessage(msg *waE2E.Message) string {
+	// --- CUSTOM FORK PATCH (interactive buttons) — see send_interactive_patch.go ---
+	if t, ok := customButtonType(msg); ok {
+		return t
+	}
+	// --- END CUSTOM FORK PATCH ---
 	switch {
 	case msg.ViewOnceMessage != nil:
 		return getButtonTypeFromMessage(msg.ViewOnceMessage.Message)
@@ -1004,6 +1009,11 @@ func getButtonTypeFromMessage(msg *waE2E.Message) string {
 }
 
 func getButtonAttributes(msg *waE2E.Message) waBinary.Attrs {
+	// --- CUSTOM FORK PATCH (interactive buttons) — see send_interactive_patch.go ---
+	if attrs, ok := customButtonAttributes(msg); ok {
+		return attrs
+	}
+	// --- END CUSTOM FORK PATCH ---
 	switch {
 	case msg.ViewOnceMessage != nil:
 		return getButtonAttributes(msg.ViewOnceMessage.Message)
@@ -1142,13 +1152,19 @@ func (cli *Client) getMessageContent(
 	}
 
 	if buttonType := getButtonTypeFromMessage(message); buttonType != "" {
-		content = append(content, waBinary.Node{
-			Tag: "biz",
-			Content: []waBinary.Node{{
-				Tag:   buttonType,
-				Attrs: getButtonAttributes(message),
-			}},
-		})
+		// --- CUSTOM FORK PATCH (interactive buttons) — see send_interactive_patch.go ---
+		if bizNode, ok := customInteractiveBizNode(message); ok {
+			content = append(content, *bizNode)
+		} else {
+			// --- END CUSTOM FORK PATCH ---
+			content = append(content, waBinary.Node{
+				Tag: "biz",
+				Content: []waBinary.Node{{
+					Tag:   buttonType,
+					Attrs: getButtonAttributes(message),
+				}},
+			})
+		}
 	}
 	return content
 }

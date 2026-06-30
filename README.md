@@ -16,6 +16,13 @@ discussions.
 The [godoc](https://pkg.go.dev/go.mau.fi/whatsmeow) includes docs for all methods and event types.
 There's also a [simple example](https://pkg.go.dev/go.mau.fi/whatsmeow#example-package) at the top.
 
+### Fork additions
+
+* Interactive (button) message helpers — convenience constructors for quick-reply
+  buttons, template buttons, list messages and carousels. See
+  [docs/interactive_messages.md](docs/interactive_messages.md).
+  **⚠️ Experimental: may cause account bans — see the doc before using.**
+
 ## Features
 Most core features are already present:
 
