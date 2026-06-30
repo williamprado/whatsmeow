@@ -320,6 +320,55 @@ vid, err := cli.UploadCarouselVideo(ctx, whatsmeow.CarouselVideo{
 See `examples/interactive-test` for an ffmpeg-based way to generate the test
 video and its thumbnail. The per-card `Image`/`Video` exclusivity still applies.
 
+### Pix and CTA buttons
+
+CTA native-flow buttons (work standalone or inside carousel cards):
+
+```go
+whatsmeow.NewCallNativeFlowButton("Call us", "+5511999999999")   // cta_call  {display_text, phone_number}
+whatsmeow.NewCopyNativeFlowButton("Copy code", "ABC123")          // cta_copy  {display_text, copy_code}
+whatsmeow.NewURLNativeFlowButton("Open", "https://example.com")   // cta_url   {display_text, url, merchant_url}
+whatsmeow.NewQuickReplyNativeFlowButton("Yes", "yes")             // quick_reply {display_text, id}
+```
+
+Pix buttons (`interactive_pix.go`):
+
+```go
+// 1) Copy the seller's Pix key (or full "Pix copia e cola" BR Code). Most
+//    reliable — it's a cta_copy and renders on normal accounts.
+whatsmeow.NewPixCopyKeyButton("Copiar chave Pix", "pix@example.com")
+
+// 2) Fallback: a cta_url to a Pix charge link.
+whatsmeow.NewPixPaymentLinkButton("Abrir cobrança", "https://pay.example.com/abc")
+
+// 3) Native payment (review_and_pay → payment_info). ⚠️ EXPERIMENTAL.
+whatsmeow.NewPixPaymentButton(whatsmeow.PixPayment{
+    DisplayText: "Pagar com Pix", AmountCents: 1000, Currency: "BRL",
+    PixKey: "pix@example.com", KeyType: "EMAIL", MerchantName: "Loja",
+    ReferenceID: "order-1", CopyPaste: "<BR Code>",
+})
+```
+
+> ⚠️ **`NewPixPaymentButton` is experimental.** It uses the native
+> `review_and_pay` flow (mapped to the `payment_info` native_flow name on the
+> `<biz>` node). Native payments generally require a **WhatsApp Business account
+> with payments enabled** and may **not render** on a normal account. The exact
+> `buttonParamsJson` schema is account-gated and not publicly documented — the
+> payload here is best-effort. Prefer **`NewPixCopyKeyButton`** (copy key) and
+> **`NewPixPaymentLinkButton`** (charge URL); see the
+> [Pix/CTA test report](interactive_messages_pix_test.md) for what actually
+> rendered.
+
+Send a Pix button like any native-flow message:
+
+```go
+msg := whatsmeow.BuildInteractiveMessage("Pague via Pix", "footer", nil,
+    []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+        whatsmeow.NewPixCopyKeyButton("Copiar chave Pix", "pix@example.com"),
+        whatsmeow.NewQuickReplyNativeFlowButton("Já paguei", "pix-paid"),
+    })
+```
+
 ## How the binary button nodes are built
 
 For an interactive message to render, WhatsApp expects the outgoing stanza to
