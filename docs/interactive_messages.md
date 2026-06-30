@@ -16,28 +16,35 @@ API.
 
 ## Helper overview
 
-| Helper | Builds | Wrapped in `<biz>` node by send core? |
+| Helper | Builds | `<biz>` routing node attached? |
 | --- | --- | --- |
-| `BuildButtonsMessage` | `waE2E.ButtonsMessage` (up to 3 quick-reply buttons) | ✅ yes (`buttons`) |
-| `BuildListMessage` | `waE2E.ListMessage` (single-select sections/rows) | ✅ yes (`list`) |
-| `BuildTemplateMessage` | `waE2E.TemplateMessage` (hydrated reply/url/call buttons) | ❌ no |
-| `BuildInteractiveMessage` | `waE2E.InteractiveMessage` (single native-flow group) | ❌ no |
-| `BuildCarouselMessage` | `waE2E.InteractiveMessage` with `CarouselMessage` | ❌ no |
+| `BuildButtonsMessage` | `waE2E.ButtonsMessage` (up to 3 quick-reply buttons) | ✅ `buttons` (upstream) |
+| `BuildListMessage` | `waE2E.ListMessage` (single-select sections/rows) | ✅ `list` (upstream) |
+| `BuildTemplateMessage` | `waE2E.TemplateMessage` (hydrated reply/url/call buttons) | ✅ `interactive`/`native_flow` (fork patch) |
+| `BuildInteractiveMessage` | `waE2E.InteractiveMessage` (single native-flow group) | ✅ `interactive`/`native_flow` (fork patch) |
+| `BuildCarouselMessage` | `waE2E.InteractiveMessage` with `CarouselMessage` | ✅ `interactive`/`native_flow` (fork patch) |
 
 See [How the binary button nodes are built](#how-the-binary-button-nodes-are-built)
 for what the last column means.
 
-> 🚧 **Core limitation — read before using.**
+> 🩹 **Fork patch applied (`send_interactive_patch.go`).**
 >
-> Only **`BuildButtonsMessage`** and **`BuildListMessage`** work out of the box:
-> the send core wraps them in the required `<biz>` node automatically, so the
-> buttons render on the recipient's device.
+> This fork now attaches the `<biz><interactive type="native_flow" v="1"/></biz>`
+> routing node for `TemplateMessage` and `InteractiveMessage` as well (upstream
+> only does it for `ButtonsMessage`/`ListMessage`). The patch is isolated in
+> [`send_interactive_patch.go`](../send_interactive_patch.go) with two 3-line
+> guarded hooks in [`send.go`](../send.go).
 >
-> **`BuildTemplateMessage`, `BuildInteractiveMessage` and `BuildCarouselMessage`
-> are inert** — they build valid structs, but the current send core sends them
-> with **no** `<biz>` / `native_flow` node, so the recipient sees no buttons.
-> They stay inert until a **core patch in [`send.go`](../send.go)** is applied
-> **and validated against a real client**:
+> ⚠️ **Emitting the correct node is necessary but may not be sufficient.** Field
+> testing (see [docs/interactive_messages_test_report.md](interactive_messages_test_report.md))
+> showed that a non-Business sender's buttons still do **not** render on a normal
+> recipient — even `ButtonsMessage`, which already had its node upstream, showed
+> "waiting for this message" and the others showed "your WhatsApp version is not
+> compatible". WhatsApp gates interactive-button **rendering** to official
+> WhatsApp Business API senders; this fork cannot lift that gating.
+>
+> Historical note — before this patch, the three types below were inert (no
+> `<biz>` node at all). The original analysis read:
 >
 > 1. register the `TemplateMessage` / `InteractiveMessage` cases in
 >    `getButtonTypeFromMessage`, and
@@ -62,6 +69,19 @@ msg := whatsmeow.BuildButtonsMessage("How can we help?", "Pick an option", []wha
 _, err := cli.SendMessage(ctx, to, msg)
 ```
 
+> 📵 **Recipient JID — handle the Brazilian 9th digit.** `SendMessage` delivers
+> to the exact JID it is given and does **not** normalize phone numbers. For some
+> accounts the dialed number differs from the registered JID (e.g.
+> `5577988272902` with the 9 resolves to `557788272902` without it). Sending to
+> the non-canonical JID is accepted by the server (you get a message ID) but
+> **delivered to nobody**. Resolve it first:
+>
+> ```go
+> to, err := cli.ResolveRecipientJID(ctx, "5577988272902") // -> 557788272902@s.whatsapp.net
+> if err != nil { /* not on WhatsApp */ }
+> _, err = cli.SendMessage(ctx, to, msg)
+> ```
+
 ### Quick-reply buttons (`ButtonsMessage`)
 
 ```go
@@ -80,7 +100,7 @@ WhatsApp's limit.
 
 ### Template buttons (`TemplateMessage`)
 
-> 🚧 **Inert until the core patch** — see the [core limitation](#interactive-button-message-helpers) above. The struct is built correctly but no buttons render without the `send.go` change.
+> 🩹 **Fork patch applies the `<biz>`/native_flow routing node** for this type (see the [fork patch note](#interactive-button-message-helpers) above). Note: emitting the node does not guarantee the recipient renders buttons — WhatsApp gates that to official Business senders.
 
 Mix quick-reply, URL and call buttons. Indexes are assigned automatically.
 
@@ -118,7 +138,7 @@ msg := whatsmeow.BuildListMessage(
 
 ### Native-flow interactive message (`InteractiveMessage`)
 
-> 🚧 **Inert until the core patch** — see the [core limitation](#interactive-button-message-helpers) above. The struct is built correctly but no buttons render without the `send.go` change.
+> 🩹 **Fork patch applies the `<biz>`/native_flow routing node** for this type (see the [fork patch note](#interactive-button-message-helpers) above). Note: emitting the node does not guarantee the recipient renders buttons — WhatsApp gates that to official Business senders.
 
 This is the modern interactive format. Header is optional (pass `nil`).
 
@@ -145,7 +165,7 @@ header := whatsmeow.NewInteractiveHeaderImage(imageMessage, "Title", "Subtitle")
 
 ### Carousel (`InteractiveMessage` + `CarouselMessage`)
 
-> 🚧 **Inert until the core patch** — see the [core limitation](#interactive-button-message-helpers) above. The struct is built correctly but no buttons render without the `send.go` change.
+> 🩹 **Fork patch applies the `<biz>`/native_flow routing node** for this type (see the [fork patch note](#interactive-button-message-helpers) above). Note: emitting the node does not guarantee the recipient renders buttons — WhatsApp gates that to official Business senders.
 
 Each card is its own native-flow interactive message, optionally with a media
 header. The carousel layout defaults to `HSCROLL_CARDS`; pass an optional last
