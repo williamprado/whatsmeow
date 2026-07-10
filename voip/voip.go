@@ -202,6 +202,14 @@ func (m *Manager) FeedCapturedPCM(callID string, pcm16 []float32) error {
 	return nil
 }
 
+// ActiveCalls returns the number of calls currently tracked by this manager.
+// Used by multi-session hosts for worker-wide capacity accounting.
+func (m *Manager) ActiveCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
 // CurrentCall returns the CallInfo for a given id, if present.
 func (m *Manager) CurrentCall(callID string) (*call.CallInfo, bool) {
 	cm, ok := m.getCall(callID)

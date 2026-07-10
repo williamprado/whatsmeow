@@ -105,6 +105,8 @@ Treat VoIP as a **controlled feature**, not a default-on capability.
   account id, a registry (etcd/Redis) mapping account→worker, or a control plane.
 - Port the reference `SessionManager` (WaCalls `cmd/server/sessionmanager.go`) as
   the multi-account host; keep the per-call bridge registry (already have).
+- **Implemented:** `voip/host` (multi-session worker) + `voip/router`
+  (consistent-hash affinity ring) — see `docs/voip_multisession.md`.
 
 ### 4.2 Capacity planning
 - Benchmark **CPU per concurrent active call** (MLow encode+decode + pion). Derive
