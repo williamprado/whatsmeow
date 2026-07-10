@@ -100,9 +100,29 @@ const $ = (id) => document.getElementById(id);
 const setStatus = (t) => { $("status").textContent = t; };
 let current = null; // { pc, callId, close }
 
+// Auth: token from ?token= or localStorage. Sent as Bearer on API calls, and as
+// ?token= on the SSE stream (EventSource cannot set headers).
+const params = new URLSearchParams(location.search);
+let TOKEN = params.get("token") || localStorage.getItem("voip_token") || "";
+if (TOKEN) localStorage.setItem("voip_token", TOKEN);
+const authHeaders = () => (TOKEN ? { Authorization: "Bearer " + TOKEN } : {});
+const api = (path, opts = {}) =>
+  fetch(path, { ...opts, headers: { ...(opts.headers || {}), ...authHeaders() } });
+
+// ICE servers (STUN/TURN) fetched from the server; refreshed per call so
+// ephemeral TURN credentials stay valid.
+let ICE_SERVERS = [];
+async function loadICE() {
+  try {
+    const r = await api("/api/config");
+    if (r.ok) ICE_SERVERS = (await r.json()).ice_servers || [];
+  } catch {}
+}
+
 async function openWebRTC(callId) {
+  await loadICE();
   const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const dc = pc.createDataChannel(PCM_LABEL, { ordered: true });
   dc.binaryType = "arraybuffer";
 
@@ -129,7 +149,7 @@ async function openWebRTC(callId) {
     if (pc.iceGatheringState === "complete") return res();
     pc.addEventListener("icegatheringstatechange", () => pc.iceGatheringState === "complete" && res());
   });
-  const r = await fetch(`/api/call/${callId}/webrtc`, {
+  const r = await api(`/api/call/${callId}/webrtc`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sdp_offer: pc.localDescription.sdp }),
   });
@@ -156,7 +176,7 @@ $("dial").onclick = async () => {
   if (!to) return;
   setStatus("discando…");
   try {
-    const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to }) });
+    const r = await api("/api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to }) });
     const { call_id, error } = await r.json();
     if (error) { setStatus("erro: " + error); return; }
     await openWebRTC(call_id);
@@ -164,7 +184,7 @@ $("dial").onclick = async () => {
 };
 
 $("hangup").onclick = async () => {
-  if (current) await fetch(`/api/call/${current.callId}`, { method: "DELETE" });
+  if (current) await api(`/api/call/${current.callId}`, { method: "DELETE" });
   endLocal();
   setStatus("encerrada");
 };
@@ -174,18 +194,19 @@ $("accept").onclick = async () => {
   const id = pendingIncoming; if (!id) return;
   $("incoming").style.display = "none";
   setStatus("atendendo…");
-  await fetch(`/api/call/${id}/accept`, { method: "POST" });
+  await api(`/api/call/${id}/accept`, { method: "POST" });
   try { await openWebRTC(id); } catch (e) { setStatus("erro: " + e.message); }
 };
 $("reject").onclick = async () => {
   const id = pendingIncoming; if (!id) return;
   $("incoming").style.display = "none";
-  await fetch(`/api/call/${id}/reject`, { method: "POST" });
+  await api(`/api/call/${id}/reject`, { method: "POST" });
   setStatus("rejeitada");
 };
 
-// Server-sent events: incoming / state / ended.
-const es = new EventSource("/api/events");
+// Server-sent events: incoming / state / ended. EventSource can't set headers,
+// so the token (if any) rides as a query param.
+const es = new EventSource("/api/events" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : ""));
 es.onopen = () => setStatus("pronto");
 es.onmessage = (e) => {
   const evt = JSON.parse(e.data);

@@ -37,6 +37,7 @@ by the `voip/` media stack.
 | Method + path | Action |
 |---|---|
 | `GET /` | agent page |
+| `GET /api/config` | ICE servers (STUN/TURN, ephemeral TURN creds) for the browser |
 | `GET /api/events` | SSE: `incoming` / `state` / `ended` |
 | `POST /api/call` `{to}` | place an outbound call → `{call_id}` |
 | `POST /api/call/{id}/webrtc` `{sdp_offer}` | attach the browser leg → `{sdp_answer}` |
@@ -44,15 +45,40 @@ by the `voip/` media stack.
 | `POST /api/call/{id}/reject` | decline an inbound call |
 | `DELETE /api/call/{id}` | hang up |
 
+### Auth & ICE (P0 hardening)
+
+The demo now carries a **bearer-token auth skeleton** and **STUN/TURN config**
+(see `docs/voip_production.md` P0). Both are demo-grade — production wires the
+same ideas into the authenticated AtendZappy backend.
+
+- **Auth:** set `AUTH_TOKEN` to require `Authorization: Bearer <token>` on every
+  `/api/*` call. The SSE stream takes it as `?token=` (EventSource can't set
+  headers). The agent page reads the token from `?token=` or `localStorage`. When
+  `AUTH_TOKEN` is unset the surface is **open** (dev only) and the server warns.
+- **ICE:** `GET /api/config` returns the ICE servers; the browser uses them and
+  the server-side pion leg uses the matching set. With `TURN_SECRET`, fresh
+  **ephemeral TURN credentials** are minted per call (coturn REST API:
+  `username = <expiryUnix>`, `credential = base64(HMAC-SHA1(secret, username))`;
+  run coturn with `use-auth-secret` + `static-auth-secret`).
+
 ## Run (disposable accounts only)
 
 ```sh
 cd voip
 VOIP_ENABLED=1 go run ./examples/voip-bridge-server
 # scan the QR (first run) with a DISPOSABLE account, then open http://localhost:8080
+
+# with auth + STUN/TURN (production-shaped):
+VOIP_ENABLED=1 AUTH_TOKEN=secret \
+  STUN_URLS=stun:stun.l.google.com:19302 \
+  TURN_URLS=turn:turn.example.com:3478 TURN_SECRET=<coturn-shared-secret> \
+  go run ./examples/voip-bridge-server
+# open http://localhost:8080/?token=secret
 ```
 
-Env: `VOIP_ENABLED` (`1` to place/answer), `ADDR` (default `:8080`), `SESSION_DB`.
+Env: `VOIP_ENABLED` (`1` to place/answer), `ADDR` (default `:8080`), `SESSION_DB`,
+`AUTH_TOKEN`, `STUN_URLS`, `TURN_URLS`, `TURN_SECRET` (or `TURN_USER`/`TURN_PASS`),
+`TURN_TTL` (ephemeral cred seconds, default 3600).
 
 - **Outbound:** type a number (digits only) → *Ligar*. The browser asks for mic
   permission, connects the WebRTC leg, and you talk once the callee answers.
@@ -60,13 +86,14 @@ Env: `VOIP_ENABLED` (`1` to place/answer), `ADDR` (default `:8080`), `SESSION_DB
 
 ## Status & validation
 
-- `go build/vet/test ./...` green for the `voip/` module (bridge + server build;
-  media/mlow/signaling/transport suites pass). `gofmt`/`goimports` clean.
+- `go build/vet/test ./...` green for the `voip/` module. `gofmt`/`goimports` clean.
 - Smoke-tested: server boots, logs into a disposable account, serves the agent
-  page (HTTP 200), and the SSE stream connects.
-- **Pending:** live browser↔phone audio field test (operator in the browser
-  talking on a real WhatsApp call), and hardening (relay reconnect, multiple
-  concurrent operators, auth on the HTTP surface) before any production use.
+  page (HTTP 200), SSE connects; **auth enforced** (`/api/config` → 401 without a
+  token, 200 with it) and `/api/config` returns STUN + an ephemeral TURN cred.
+- **Field-tested:** operator in the browser held a real WhatsApp call with
+  **bidirectional audio** (both directions confirmed audibly).
+- **Still pending for production:** TURN behind real NATs, relay reconnect,
+  multiple concurrent operators, and integration into the authenticated backend.
 
 ## Notes
 
