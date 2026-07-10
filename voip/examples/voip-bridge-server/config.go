@@ -22,7 +22,24 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/williamprado/whatsmeow/voip/cdr"
+	"github.com/williamprado/whatsmeow/voip/guard"
 )
+
+// loadGuard builds the ban-risk guard-rail from env. Defaults are permissive so
+// the demo works out of the box; production sets real limits.
+//
+//	GUARD_OPTIN=1                 require per-account opt-in
+//	GUARD_MAX_CALLS + GUARD_WINDOW_SEC     per-account call rate limit
+//	GUARD_FAIL_THRESHOLD + GUARD_FAIL_WINDOW_SEC   auto-kill on failure rate
+func loadGuard() *guard.Guard {
+	return guard.New(guard.Config{
+		OptInRequired:     os.Getenv("GUARD_OPTIN") == "1",
+		MaxCallsPerWindow: atoiDefault(os.Getenv("GUARD_MAX_CALLS"), 0),
+		Window:            time.Duration(atoiDefault(os.Getenv("GUARD_WINDOW_SEC"), 60)) * time.Second,
+		FailureThreshold:  atoiDefault(os.Getenv("GUARD_FAIL_THRESHOLD"), 0),
+		FailureWindow:     time.Duration(atoiDefault(os.Getenv("GUARD_FAIL_WINDOW_SEC"), 300)) * time.Second,
+	})
+}
 
 // openDB opens the session store: Postgres when DATABASE_URL is set (multi-node /
 // HA), else the local SQLite file. Returns the *sql.DB and the whatsmeow dialect.

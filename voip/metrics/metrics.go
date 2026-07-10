@@ -32,6 +32,8 @@ type Metrics struct {
 	setupLatency    prometheus.Histogram // offer -> active, seconds
 	callDuration    prometheus.Histogram // active -> ended, seconds
 	peerAudioFrames prometheus.Counter
+	callsBlocked    *prometheus.CounterVec // by reason (guard-rail)
+	accountsKilled  prometheus.Counter     // ban guard auto-disables
 }
 
 // New builds and registers the collectors.
@@ -73,10 +75,19 @@ func New() *Metrics {
 			Name: "voip_peer_audio_frames_total",
 			Help: "Decoded peer audio frames delivered.",
 		}),
+		callsBlocked: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "voip_calls_blocked_total",
+			Help: "Calls blocked by the ban guard-rail, by reason.",
+		}, []string{"reason"}),
+		accountsKilled: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "voip_accounts_auto_killed_total",
+			Help: "Accounts auto-disabled by the ban failure monitor.",
+		}),
 	}
 	reg.MustRegister(
 		m.callsStarted, m.callsAnswered, m.callsEnded, m.callErrors,
 		m.activeCalls, m.setupLatency, m.callDuration, m.peerAudioFrames,
+		m.callsBlocked, m.accountsKilled,
 	)
 	return m
 }
@@ -99,3 +110,5 @@ func (m *Metrics) ActiveDec()                      { m.activeCalls.Dec() }
 func (m *Metrics) ObserveSetup(seconds float64)    { m.setupLatency.Observe(seconds) }
 func (m *Metrics) ObserveDuration(seconds float64) { m.callDuration.Observe(seconds) }
 func (m *Metrics) PeerAudioFrame()                 { m.peerAudioFrames.Inc() }
+func (m *Metrics) CallBlocked(reason string)       { m.callsBlocked.WithLabelValues(reason).Inc() }
+func (m *Metrics) AccountAutoKilled()              { m.accountsKilled.Inc() }
