@@ -33,6 +33,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/williamprado/whatsmeow/voip"
+
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
