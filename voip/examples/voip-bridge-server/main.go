@@ -55,6 +55,7 @@ var agentHTML []byte
 type appServer struct {
 	mgr *voip.Manager
 	log *slog.Logger
+	ice iceConfig
 
 	mu      sync.Mutex
 	bridges map[string]*bridge.Bridge // callID -> browser bridge
@@ -107,6 +108,7 @@ func run() error {
 	app := &appServer{
 		mgr:     voip.New(client, voip.Config{Enabled: enabled, MaxConcurrentCalls: 1}, slog.Default()),
 		log:     slog.Default(),
+		ice:     loadICEConfig(),
 		bridges: make(map[string]*bridge.Bridge),
 		subs:    make(map[chan sseEvent]struct{}),
 	}
@@ -135,6 +137,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", app.handleIndex)
+	mux.HandleFunc("GET /api/config", app.handleConfig)
 	mux.HandleFunc("GET /api/events", app.handleEvents)
 	mux.HandleFunc("POST /api/call", app.handleStartCall)
 	mux.HandleFunc("POST /api/call/{id}/webrtc", app.handleWebRTC)
@@ -142,8 +145,24 @@ func run() error {
 	mux.HandleFunc("POST /api/call/{id}/reject", app.handleReject)
 	mux.HandleFunc("DELETE /api/call/{id}", app.handleEndCall)
 
+	authToken := os.Getenv("AUTH_TOKEN")
+	if authToken == "" {
+		fmt.Println("⚠️  AUTH_TOKEN not set — the HTTP surface is OPEN (dev only). Set AUTH_TOKEN in production.")
+	}
+	if len(app.ice.turnURLs) == 0 {
+		fmt.Println("⚠️  no TURN_URLS set — browser leg works on localhost/LAN only. Set STUN/TURN for the internet.")
+	}
+	handler := authMiddleware(authToken, mux)
+
 	fmt.Printf("✅ bridge server on http://localhost%s (enabled=%v) — open it in a browser\n", addr, enabled)
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, handler)
+}
+
+// handleConfig returns the ICE servers (STUN/TURN, with fresh ephemeral TURN
+// credentials when a shared secret is configured) for the browser to use.
+func (app *appServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	_, js := app.ice.servers(time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{"ice_servers": js})
 }
 
 func (app *appServer) connect(ctx context.Context, client *whatsmeow.Client) error {
@@ -198,7 +217,8 @@ func (app *appServer) handleWebRTC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sdp_offer required"})
 		return
 	}
-	br, answer, err := bridge.New(body.SDPOffer, app.log)
+	iceServers, _ := app.ice.servers(time.Now())
+	br, answer, err := bridge.New(body.SDPOffer, iceServers, app.log)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

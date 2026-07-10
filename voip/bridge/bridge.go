@@ -41,12 +41,14 @@ type Bridge struct {
 }
 
 // New answers the browser's SDP offer, sets up the PCM data channel, and returns
-// the Bridge plus the SDP answer to hand back to the browser.
-func New(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
+// the Bridge plus the SDP answer to hand back to the browser. iceServers are the
+// STUN/TURN servers for the browser leg's NAT traversal (nil is fine on
+// localhost/LAN, but production needs at least STUN and usually TURN).
+func New(offerSDP string, iceServers []webrtc.ICEServer, log *slog.Logger) (*Bridge, string, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return nil, "", err
 	}
