@@ -45,6 +45,8 @@ by the `voip/` media stack.
 | `POST /api/call/{id}/accept` | answer an inbound call |
 | `POST /api/call/{id}/reject` | decline an inbound call |
 | `DELETE /api/call/{id}` | hang up |
+| `POST /api/admin/kill` | ban guard: disable the account (kill switch) |
+| `POST /api/admin/revive` | ban guard: re-enable the account |
 
 ### Auth & ICE (P0 hardening)
 
@@ -94,6 +96,22 @@ not using Postgres, default `cdr.jsonl`).
 - **CDR:** the reusable `voip/cdr` package records one row per call (direction,
   peer, timestamps, setup/duration, end reason). Sink is **Postgres** (`voip_cdr`
   table, auto-created) when `DATABASE_URL` is set, else **JSON lines** to `CDR_FILE`.
+
+### Ban guard-rail (P0 — highest-value safety control)
+
+The reusable `voip/guard` package gates every place/answer and reacts to failure
+signals — the top ban-risk control from `docs/voip_production.md` §2. The server
+gates `StartCall`/`AcceptCall` through it, feeds failures on error/bad end reason,
+and exposes a manual kill switch via `POST /api/admin/{kill,revive}`.
+
+- **Opt-in:** `GUARD_OPTIN=1` requires each account to be opted in (the demo
+  auto-opts the logged-in account; production manages opt-in per tenant).
+- **Rate limit:** `GUARD_MAX_CALLS` per `GUARD_WINDOW_SEC` (default 60) per account.
+- **Auto-kill:** `GUARD_FAIL_THRESHOLD` failures within `GUARD_FAIL_WINDOW_SEC`
+  (default 300) auto-disables the account (a proxy for `error 479` / rejections;
+  production also feeds real 479/ban signals). Fires a log + `voip_accounts_auto_killed_total`.
+- **Kill switch:** blocked calls return HTTP 403 **before dialing** and increment
+  `voip_calls_blocked_total{reason=...}` (`killed` / `rate_limited` / `not_opted_in`).
 
 - **Outbound:** type a number (digits only) → *Ligar*. The browser asks for mic
   permission, connects the WebRTC leg, and you talk once the callee answers.

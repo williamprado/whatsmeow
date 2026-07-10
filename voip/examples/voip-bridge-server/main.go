@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -42,6 +43,7 @@ import (
 	"github.com/williamprado/whatsmeow/voip/call"
 	"github.com/williamprado/whatsmeow/voip/cdr"
 	"github.com/williamprado/whatsmeow/voip/core"
+	"github.com/williamprado/whatsmeow/voip/guard"
 	"github.com/williamprado/whatsmeow/voip/metrics"
 
 	"go.mau.fi/whatsmeow"
@@ -59,7 +61,8 @@ type appServer struct {
 	ice     iceConfig
 	mtr     *metrics.Metrics
 	cdr     *cdr.Recorder
-	account string // our own JID, for CDR
+	guard   *guard.Guard
+	account string // our own JID, for CDR + guard
 
 	mu      sync.Mutex
 	bridges map[string]*bridge.Bridge // callID -> browser bridge
@@ -122,10 +125,18 @@ func run() error {
 		ice:     loadICEConfig(),
 		mtr:     metrics.New(),
 		cdr:     cdr.NewRecorder(cdrSink),
+		guard:   loadGuard(),
 		account: account,
 		bridges: make(map[string]*bridge.Bridge),
 		subs:    make(map[chan sseEvent]struct{}),
 	}
+	// Demo convenience: opt the logged-in account in (production manages opt-in
+	// per tenant externally). Auto-kill feeds a metric + log.
+	app.guard.AllowAccount(account)
+	app.guard.OnAutoKill(func(acc, reason string) {
+		app.mtr.AccountAutoKilled()
+		app.log.Error("ban guard auto-disabled account", "account", acc, "reason", reason)
+	})
 	fmt.Printf("store=%s cdr=%s\n", dialect, map[bool]string{true: "postgres", false: "jsonl"}[usePostgres])
 
 	app.mgr.OnIncomingCall(func(c *call.CallInfo) {
@@ -150,6 +161,13 @@ func run() error {
 				app.mtr.ObserveDuration(rec.DurationSec)
 				app.mtr.ActiveDec()
 			}
+		}
+		// Feed the ban guard: failure-ish end reasons count toward auto-kill; a
+		// clean answered call clears the recent failure history.
+		if isFailureReason(c.StateData.EndReason) {
+			app.guard.RecordFailure(app.account, string(c.StateData.EndReason))
+		} else if ok && rec.Answered {
+			app.guard.RecordSuccess(app.account)
 		}
 		app.closeBridge(c.CallID)
 		app.broadcast(sseEvent{Type: "ended", CallID: c.CallID, Reason: string(c.StateData.EndReason)})
@@ -177,6 +195,8 @@ func run() error {
 	mux.HandleFunc("POST /api/call/{id}/accept", app.handleAccept)
 	mux.HandleFunc("POST /api/call/{id}/reject", app.handleReject)
 	mux.HandleFunc("DELETE /api/call/{id}", app.handleEndCall)
+	mux.HandleFunc("POST /api/admin/kill", app.handleKill)
+	mux.HandleFunc("POST /api/admin/revive", app.handleRevive)
 
 	authToken := os.Getenv("AUTH_TOKEN")
 	if authToken == "" {
@@ -232,10 +252,16 @@ func (app *appServer) handleStartCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to (phone number, digits only) required"})
 		return
 	}
+	if err := app.guard.Allow(app.account); err != nil {
+		app.mtr.CallBlocked(guardReason(err))
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	peer := types.NewJID(body.To, types.DefaultUserServer)
 	callID, err := app.mgr.StartCall(r.Context(), peer, false)
 	if err != nil {
 		app.mtr.CallError("start")
+		app.guard.RecordFailure(app.account, "start_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -266,11 +292,56 @@ func (app *appServer) handleWebRTC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *appServer) handleAccept(w http.ResponseWriter, r *http.Request) {
+	if err := app.guard.Allow(app.account); err != nil {
+		app.mtr.CallBlocked(guardReason(err))
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := app.mgr.AcceptCall(r.Context(), r.PathValue("id")); err != nil {
+		app.mtr.CallError("accept")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+// handleKill / handleRevive drive the manual kill switch (admin, behind auth).
+func (app *appServer) handleKill(w http.ResponseWriter, r *http.Request) {
+	app.guard.Kill(app.account, "manual (admin)")
+	app.log.Warn("account manually killed via admin", "account", app.account)
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true", "account": app.account})
+}
+
+func (app *appServer) handleRevive(w http.ResponseWriter, r *http.Request) {
+	app.guard.Revive(app.account)
+	app.log.Info("account revived via admin", "account", app.account)
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true", "account": app.account})
+}
+
+// guardReason maps a guard error to a short metric label.
+func guardReason(err error) string {
+	switch {
+	case errors.Is(err, guard.ErrNotOptedIn):
+		return "not_opted_in"
+	case errors.Is(err, guard.ErrKilled):
+		return "killed"
+	case errors.Is(err, guard.ErrRateLimited):
+		return "rate_limited"
+	default:
+		return "other"
+	}
+}
+
+// isFailureReason reports whether a call end reason should count toward the ban
+// failure monitor (a proxy for error 479 / server rejections; production feeds
+// real 479/ban signals too).
+func isFailureReason(reason core.EndCallReason) bool {
+	switch reason {
+	case core.EndCallReasonFailed, core.EndCallReasonTimeout, core.EndCallReasonUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func (app *appServer) handleReject(w http.ResponseWriter, r *http.Request) {
