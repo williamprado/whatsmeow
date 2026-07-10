@@ -2,10 +2,11 @@ package signaling
 
 import (
 	"encoding/base64"
-	"github.com/williamprado/whatsmeow/voip/core"
-	"github.com/williamprado/whatsmeow/voip/wanode"
 	"sort"
 	"strconv"
+
+	"github.com/williamprado/whatsmeow/voip/core"
+	"github.com/williamprado/whatsmeow/voip/wanode"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 )

@@ -2,11 +2,12 @@ package transport
 
 import (
 	"fmt"
-	"github.com/williamprado/whatsmeow/voip/core"
 	"log/slog"
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/williamprado/whatsmeow/voip/core"
 
 	"github.com/pion/webrtc/v4"
 )

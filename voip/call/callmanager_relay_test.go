@@ -1,8 +1,9 @@
 package call
 
 import (
-	"github.com/williamprado/whatsmeow/voip/core"
 	"testing"
+
+	"github.com/williamprado/whatsmeow/voip/core"
 )
 
 func TestBuildRelayConfigs(t *testing.T) {

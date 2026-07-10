@@ -2,14 +2,15 @@ package call
 
 import (
 	"context"
+	"log/slog"
+	"sync"
+	"time"
+
 	"github.com/williamprado/whatsmeow/voip/core"
 	"github.com/williamprado/whatsmeow/voip/media"
 	"github.com/williamprado/whatsmeow/voip/signaling"
 	"github.com/williamprado/whatsmeow/voip/transport"
 	"github.com/williamprado/whatsmeow/voip/wanode"
-	"log/slog"
-	"sync"
-	"time"
 
 	"go.mau.fi/whatsmeow/types"
 )

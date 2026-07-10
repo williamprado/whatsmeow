@@ -1,10 +1,11 @@
 package call
 
 import (
+	"time"
+
 	"github.com/williamprado/whatsmeow/voip/core"
 	"github.com/williamprado/whatsmeow/voip/media"
 	"github.com/williamprado/whatsmeow/voip/transport"
-	"time"
 )
 
 func (m *CallManager) initCodec() {

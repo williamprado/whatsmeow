@@ -3,6 +3,7 @@ package signaling
 import (
 	"context"
 	"fmt"
+
 	"github.com/williamprado/whatsmeow/voip/core"
 	"github.com/williamprado/whatsmeow/voip/wanode"
 

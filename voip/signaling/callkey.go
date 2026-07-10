@@ -5,13 +5,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"github.com/williamprado/whatsmeow/voip/core"
 	"strings"
+
+	"github.com/williamprado/whatsmeow/voip/core"
+
+	"google.golang.org/protobuf/proto"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 )
 
 var encryptedCallTags = map[string]bool{"preaccept": true, "accept": true}

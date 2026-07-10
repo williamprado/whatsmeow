@@ -4,6 +4,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+
 	"github.com/williamprado/whatsmeow/voip/core"
 )
 

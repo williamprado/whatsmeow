@@ -4,8 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"github.com/williamprado/whatsmeow/voip/core"
 	"math/big"
+
+	"github.com/williamprado/whatsmeow/voip/core"
 )
 
 const (

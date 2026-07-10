@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
+
 	"github.com/williamprado/whatsmeow/voip/core"
 )
 

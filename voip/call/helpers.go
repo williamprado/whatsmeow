@@ -1,9 +1,10 @@
 package call
 
 import (
+	"strings"
+
 	"github.com/williamprado/whatsmeow/voip/core"
 	"github.com/williamprado/whatsmeow/voip/wanode"
-	"strings"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 )

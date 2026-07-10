@@ -2,8 +2,9 @@ package call
 
 import (
 	"fmt"
-	"github.com/williamprado/whatsmeow/voip/core"
 	"time"
+
+	"github.com/williamprado/whatsmeow/voip/core"
 )
 
 type CallStateData struct {
