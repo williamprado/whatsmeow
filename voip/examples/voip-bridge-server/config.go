@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"net/http"
 	"os"
@@ -17,8 +18,37 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq" // postgres driver ("postgres")
 	"github.com/pion/webrtc/v4"
+
+	"github.com/williamprado/whatsmeow/voip/cdr"
 )
+
+// openDB opens the session store: Postgres when DATABASE_URL is set (multi-node /
+// HA), else the local SQLite file. Returns the *sql.DB and the whatsmeow dialect.
+func openDB() (*sql.DB, string, error) {
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		db, err := sql.Open("postgres", url)
+		return db, "postgres", err
+	}
+	sessionFile := getenv("SESSION_DB", "examples/voip-bridge-server/session.db")
+	db, err := sql.Open("sqlite", "file:"+sessionFile+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(15000)")
+	return db, "sqlite3", err
+}
+
+// openCDRSink returns a Postgres CDR sink when using Postgres, else a JSON-lines
+// file sink (CDR_FILE, default examples/voip-bridge-server/cdr.jsonl).
+func openCDRSink(db *sql.DB, usePostgres bool) (cdr.Sink, error) {
+	if usePostgres {
+		return cdr.NewPostgresSink(db)
+	}
+	path := getenv("CDR_FILE", "examples/voip-bridge-server/cdr.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	return cdr.NewJSONLSink(f), nil
+}
 
 // --- P0 hardening: ICE (STUN/TURN) config + HTTP bearer-token auth ---
 //

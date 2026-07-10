@@ -24,7 +24,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -41,7 +40,9 @@ import (
 	"github.com/williamprado/whatsmeow/voip"
 	"github.com/williamprado/whatsmeow/voip/bridge"
 	"github.com/williamprado/whatsmeow/voip/call"
+	"github.com/williamprado/whatsmeow/voip/cdr"
 	"github.com/williamprado/whatsmeow/voip/core"
+	"github.com/williamprado/whatsmeow/voip/metrics"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -53,9 +54,12 @@ import (
 var agentHTML []byte
 
 type appServer struct {
-	mgr *voip.Manager
-	log *slog.Logger
-	ice iceConfig
+	mgr     *voip.Manager
+	log     *slog.Logger
+	ice     iceConfig
+	mtr     *metrics.Metrics
+	cdr     *cdr.Recorder
+	account string // our own JID, for CDR
 
 	mu      sync.Mutex
 	bridges map[string]*bridge.Bridge // callID -> browser bridge
@@ -83,19 +87,15 @@ func run() error {
 	if addr == "" {
 		addr = ":8080"
 	}
-	sessionFile := os.Getenv("SESSION_DB")
-	if sessionFile == "" {
-		sessionFile = "examples/voip-bridge-server/session.db"
-	}
-
 	fmt.Println("⚠️  VERY HIGH BAN RISK: scan the QR ONLY with a disposable account. NEVER production.")
 	ctx := context.Background()
-	db, err := sql.Open("sqlite", "file:"+sessionFile+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(15000)")
+	db, dialect, err := openDB()
 	if err != nil {
 		return fmt.Errorf("open session db: %w", err)
 	}
 	defer db.Close()
-	container := sqlstore.NewWithDB(db, "sqlite3", waLog.Stdout("Database", "INFO", true))
+	usePostgres := dialect == "postgres"
+	container := sqlstore.NewWithDB(db, dialect, waLog.Stdout("Database", "INFO", true))
 	if err = container.Upgrade(ctx); err != nil {
 		return fmt.Errorf("upgrade session db: %w", err)
 	}
@@ -105,25 +105,57 @@ func run() error {
 	}
 	client := whatsmeow.NewClient(device, waLog.Stdout("Client", "INFO", true))
 
+	cdrSink, err := openCDRSink(db, usePostgres)
+	if err != nil {
+		return fmt.Errorf("open cdr sink: %w", err)
+	}
+	defer cdrSink.Close()
+
+	account := ""
+	if device.ID != nil {
+		account = device.ID.String()
+	}
+
 	app := &appServer{
 		mgr:     voip.New(client, voip.Config{Enabled: enabled, MaxConcurrentCalls: 1}, slog.Default()),
 		log:     slog.Default(),
 		ice:     loadICEConfig(),
+		mtr:     metrics.New(),
+		cdr:     cdr.NewRecorder(cdrSink),
+		account: account,
 		bridges: make(map[string]*bridge.Bridge),
 		subs:    make(map[chan sseEvent]struct{}),
 	}
+	fmt.Printf("store=%s cdr=%s\n", dialect, map[bool]string{true: "postgres", false: "jsonl"}[usePostgres])
 
 	app.mgr.OnIncomingCall(func(c *call.CallInfo) {
+		app.cdr.Started(c.CallID, "inbound", c.PeerJid, app.account)
+		app.mtr.CallStarted("inbound")
 		app.broadcast(sseEvent{Type: "incoming", CallID: c.CallID, Peer: c.PeerJid})
 	})
 	app.mgr.OnCallStateChange(func(c *call.CallInfo) {
+		if c.StateData.State == core.CallStateActive {
+			app.cdr.Answered(c.CallID)
+			app.mtr.CallAnswered()
+			app.mtr.ActiveInc()
+		}
 		app.broadcast(sseEvent{Type: "state", CallID: c.CallID, State: string(c.StateData.State)})
 	})
 	app.mgr.OnCallEnded(func(c *call.CallInfo) {
+		rec, ok, _ := app.cdr.Ended(c.CallID, string(c.StateData.EndReason))
+		if ok {
+			app.mtr.CallEnded(rec.EndReason)
+			if rec.Answered {
+				app.mtr.ObserveSetup(rec.SetupSec)
+				app.mtr.ObserveDuration(rec.DurationSec)
+				app.mtr.ActiveDec()
+			}
+		}
 		app.closeBridge(c.CallID)
 		app.broadcast(sseEvent{Type: "ended", CallID: c.CallID, Reason: string(c.StateData.EndReason)})
 	})
 	app.mgr.OnPeerAudio(func(callID string, pcm16 []float32) {
+		app.mtr.PeerAudioFrame()
 		if b := app.getBridge(callID); b != nil {
 			_ = b.WritePCM(pcm16)
 		}
@@ -137,6 +169,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", app.handleIndex)
+	mux.Handle("GET /metrics", app.mtr.Handler())
 	mux.HandleFunc("GET /api/config", app.handleConfig)
 	mux.HandleFunc("GET /api/events", app.handleEvents)
 	mux.HandleFunc("POST /api/call", app.handleStartCall)
@@ -202,9 +235,12 @@ func (app *appServer) handleStartCall(w http.ResponseWriter, r *http.Request) {
 	peer := types.NewJID(body.To, types.DefaultUserServer)
 	callID, err := app.mgr.StartCall(r.Context(), peer, false)
 	if err != nil {
+		app.mtr.CallError("start")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	app.cdr.Started(callID, "outbound", body.To, app.account)
+	app.mtr.CallStarted("outbound")
 	writeJSON(w, http.StatusOK, map[string]string{"call_id": callID})
 }
 

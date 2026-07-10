@@ -37,6 +37,7 @@ by the `voip/` media stack.
 | Method + path | Action |
 |---|---|
 | `GET /` | agent page |
+| `GET /metrics` | Prometheus metrics (calls started/answered/ended, active, setup/duration histograms) |
 | `GET /api/config` | ICE servers (STUN/TURN, ephemeral TURN creds) for the browser |
 | `GET /api/events` | SSE: `incoming` / `state` / `ended` |
 | `POST /api/call` `{to}` | place an outbound call → `{call_id}` |
@@ -78,7 +79,21 @@ VOIP_ENABLED=1 AUTH_TOKEN=secret \
 
 Env: `VOIP_ENABLED` (`1` to place/answer), `ADDR` (default `:8080`), `SESSION_DB`,
 `AUTH_TOKEN`, `STUN_URLS`, `TURN_URLS`, `TURN_SECRET` (or `TURN_USER`/`TURN_PASS`),
-`TURN_TTL` (ephemeral cred seconds, default 3600).
+`TURN_TTL` (ephemeral cred seconds, default 3600), `DATABASE_URL` (Postgres session
+store + CDR; falls back to SQLite when unset), `CDR_FILE` (JSON-lines CDR path when
+not using Postgres, default `cdr.jsonl`).
+
+### Store, metrics & CDR (P0 hardening)
+
+- **Session store:** set `DATABASE_URL` to use **Postgres** (`sqlstore` dialect
+  `postgres`) for multi-node / HA; unset falls back to the local **SQLite** file.
+- **Metrics:** `GET /metrics` exposes Prometheus collectors from the reusable
+  `voip/metrics` package (calls started by direction, answered, ended by reason,
+  active gauge, setup/duration histograms, peer-audio frames). Put it on an
+  internal port or behind scraper auth in production.
+- **CDR:** the reusable `voip/cdr` package records one row per call (direction,
+  peer, timestamps, setup/duration, end reason). Sink is **Postgres** (`voip_cdr`
+  table, auto-created) when `DATABASE_URL` is set, else **JSON lines** to `CDR_FILE`.
 
 - **Outbound:** type a number (digits only) → *Ligar*. The browser asks for mic
   permission, connects the WebRTC leg, and you talk once the callee answers.
