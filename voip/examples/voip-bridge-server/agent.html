@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VoIP Bridge — Agente</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  .row { display: flex; gap: .5rem; align-items: center; margin: .75rem 0; }
+  input { flex: 1; padding: .5rem; font-size: 1rem; }
+  button { padding: .5rem .9rem; font-size: 1rem; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { padding: .5rem .75rem; border-radius: .4rem; background: #8883; }
+  #incoming { display: none; padding: .75rem; border-radius: .4rem; background: #2a7f2a22; border: 1px solid #2a7f2a55; }
+  .muted { opacity: .7; font-size: .85rem; }
+  .warn { color: #b30; font-size: .8rem; }
+</style>
+</head>
+<body>
+  <h1>📞 VoIP Bridge — Atendente</h1>
+  <p class="warn">⚠️ Conta descartável apenas. Permita o microfone quando o navegador pedir.</p>
+
+  <div class="row">
+    <input id="to" placeholder="número (só dígitos, ex.: 5577988272902)" inputmode="numeric" />
+    <button id="dial">Ligar</button>
+  </div>
+
+  <div id="incoming">
+    <div>📲 Chamada recebida de <b id="incoming-peer"></b></div>
+    <div class="row">
+      <button id="accept">Atender</button>
+      <button id="reject">Rejeitar</button>
+    </div>
+  </div>
+
+  <div class="row"><div id="status">desconectado</div></div>
+  <div class="row"><button id="hangup" disabled>Desligar</button></div>
+  <p class="muted" id="callinfo"></p>
+
+<script>
+const SAMPLE_RATE = 16000;
+const PCM_LABEL = "pcm";
+
+// Inlined AudioWorklets (served as Blob URLs so the page is self-contained).
+const CAPTURE_SRC = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch && ch.length) this.port.postMessage(ch.slice(0));
+    return true;
+  }
+}
+registerProcessor("capture-processor", CaptureProcessor);
+`;
+const PLAYBACK_SRC = `
+const RING = 16000 * 2;
+class PlaybackProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ring = new Float32Array(RING); this.read = 0; this.write = 0; this.avail = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      for (let i = 0; i < d.length; i++) {
+        this.ring[this.write] = d[i]; this.write = (this.write + 1) % RING;
+        if (this.avail < RING) this.avail++; else this.read = (this.read + 1) % RING;
+      }
+    };
+  }
+  process(_in, outputs) {
+    const out = outputs[0][0]; if (!out) return true;
+    for (let i = 0; i < out.length; i++) {
+      if (this.avail > 0) { out[i] = this.ring[this.read]; this.read = (this.read + 1) % RING; this.avail--; }
+      else out[i] = 0;
+    }
+    return true;
+  }
+}
+registerProcessor("playback-processor", PlaybackProcessor);
+`;
+const captureURL = URL.createObjectURL(new Blob([CAPTURE_SRC], { type: "application/javascript" }));
+const playbackURL = URL.createObjectURL(new Blob([PLAYBACK_SRC], { type: "application/javascript" }));
+
+function f32ToI16LE(f32) {
+  const out = new DataView(new ArrayBuffer(f32.length * 2));
+  for (let i = 0; i < f32.length; i++) {
+    let s = Math.max(-1, Math.min(1, f32[i]));
+    out.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return out.buffer;
+}
+function i16LEToF32(buf) {
+  const dv = new DataView(buf), out = new Float32Array(buf.byteLength / 2);
+  for (let i = 0; i < out.length; i++) out[i] = dv.getInt16(i * 2, true) / 32768;
+  return out;
+}
+
+const $ = (id) => document.getElementById(id);
+const setStatus = (t) => { $("status").textContent = t; };
+let current = null; // { pc, callId, close }
+
+async function openWebRTC(callId) {
+  const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const dc = pc.createDataChannel(PCM_LABEL, { ordered: true });
+  dc.binaryType = "arraybuffer";
+
+  const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  await ctx.audioWorklet.addModule(captureURL);
+  await ctx.audioWorklet.addModule(playbackURL);
+  await ctx.resume();
+
+  const micNode = ctx.createMediaStreamSource(mic);
+  const capture = new AudioWorkletNode(ctx, "capture-processor");
+  capture.port.onmessage = (e) => { if (dc.readyState === "open") dc.send(f32ToI16LE(e.data)); };
+  micNode.connect(capture); capture.connect(ctx.destination);
+
+  const playback = new AudioWorkletNode(ctx, "playback-processor");
+  const sink = ctx.createMediaStreamDestination();
+  playback.connect(sink);
+  dc.onmessage = (e) => playback.port.postMessage(i16LEToF32(e.data));
+  // Route playback to an <audio> element so it is actually heard.
+  const audio = new Audio(); audio.srcObject = sink.stream; audio.play().catch(() => {});
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await new Promise((res) => {
+    if (pc.iceGatheringState === "complete") return res();
+    pc.addEventListener("icegatheringstatechange", () => pc.iceGatheringState === "complete" && res());
+  });
+  const r = await fetch(`/api/call/${callId}/webrtc`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sdp_offer: pc.localDescription.sdp }),
+  });
+  const { sdp_answer, error } = await r.json();
+  if (error) throw new Error(error);
+  await pc.setRemoteDescription({ type: "answer", sdp: sdp_answer });
+
+  current = {
+    pc, callId,
+    close: () => { try { mic.getTracks().forEach((t) => t.stop()); } catch {} try { ctx.close(); } catch {} try { pc.close(); } catch {} },
+  };
+  $("hangup").disabled = false;
+  $("callinfo").textContent = "call " + callId;
+}
+
+function endLocal() {
+  if (current) { current.close(); current = null; }
+  $("hangup").disabled = true;
+  $("callinfo").textContent = "";
+}
+
+$("dial").onclick = async () => {
+  const to = $("to").value.trim();
+  if (!to) return;
+  setStatus("discando…");
+  try {
+    const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to }) });
+    const { call_id, error } = await r.json();
+    if (error) { setStatus("erro: " + error); return; }
+    await openWebRTC(call_id);
+  } catch (e) { setStatus("erro: " + e.message); }
+};
+
+$("hangup").onclick = async () => {
+  if (current) await fetch(`/api/call/${current.callId}`, { method: "DELETE" });
+  endLocal();
+  setStatus("encerrada");
+};
+
+let pendingIncoming = null;
+$("accept").onclick = async () => {
+  const id = pendingIncoming; if (!id) return;
+  $("incoming").style.display = "none";
+  setStatus("atendendo…");
+  await fetch(`/api/call/${id}/accept`, { method: "POST" });
+  try { await openWebRTC(id); } catch (e) { setStatus("erro: " + e.message); }
+};
+$("reject").onclick = async () => {
+  const id = pendingIncoming; if (!id) return;
+  $("incoming").style.display = "none";
+  await fetch(`/api/call/${id}/reject`, { method: "POST" });
+  setStatus("rejeitada");
+};
+
+// Server-sent events: incoming / state / ended.
+const es = new EventSource("/api/events");
+es.onopen = () => setStatus("pronto");
+es.onmessage = (e) => {
+  const evt = JSON.parse(e.data);
+  if (evt.type === "incoming") {
+    pendingIncoming = evt.call_id;
+    $("incoming-peer").textContent = evt.peer || "";
+    $("incoming").style.display = "block";
+    setStatus("chamada recebida");
+  } else if (evt.type === "state") {
+    setStatus("estado: " + evt.state);
+  } else if (evt.type === "ended") {
+    if (current && current.callId === evt.call_id) endLocal();
+    $("incoming").style.display = "none";
+    setStatus("encerrada (" + (evt.reason || "") + ")");
+  }
+};
+es.onerror = () => setStatus("SSE desconectado (reconectando…)");
+</script>
+</body>
+</html>
