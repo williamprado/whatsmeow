@@ -8,6 +8,7 @@ package voip
 
 import (
 	"context"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
@@ -66,6 +67,17 @@ func (c *clientAdapter) GetPrivacyToken(ctx context.Context, jid types.JID) ([]b
 		return nil, err
 	}
 	return tok.Token, nil
+}
+
+func (c *clientAdapter) GenerateMessageID() string { return c.cli.GenerateMessageID() }
+
+func (c *clientAdapter) EncryptMessageForDevices(ctx context.Context, devices []types.JID, id string, plaintext, dsm []byte, encAttrs waBinary.Attrs) ([]waBinary.Node, bool, error) {
+	return c.di.EncryptMessageForDevices(ctx, devices, id, plaintext, dsm, encAttrs)
+}
+
+func (c *clientAdapter) DecryptDM(ctx context.Context, child *waBinary.Node, from types.JID, isPreKey bool) ([]byte, error) {
+	plaintext, _, err := c.di.DecryptDM(ctx, child, from, isPreKey, time.Now())
+	return plaintext, err
 }
 
 // NewVoipSocket builds the VoipSocket adapter over a *whatsmeow.Client.

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -31,13 +32,15 @@ type Config struct {
 	Enabled bool
 }
 
-// IncomingCall describes a received call offer (Phase 0 surfaces this; it does
-// not set up any audio).
+// IncomingCall describes a received call offer.
 type IncomingCall struct {
 	CallID      string
 	From        types.JID // the caller
 	CallCreator types.JID
 	Timestamp   time.Time
+	// Offer is the raw <offer> node (carries the encrypted call key). Used by
+	// DecryptCallKey; nil for synthesized calls.
+	Offer *waBinary.Node
 }
 
 // ErrDisabled is returned by actions when the Manager is not enabled.
@@ -116,6 +119,7 @@ func (m *Manager) handleEvent(evt any) {
 			From:        e.From,
 			CallCreator: e.CallCreator,
 			Timestamp:   e.Timestamp,
+			Offer:       e.Data,
 		}
 		m.log.Infof("Incoming call: id=%s from=%s creator=%s ts=%s", call.CallID, call.From, call.CallCreator, call.Timestamp.Format(time.RFC3339))
 		m.mu.Lock()
@@ -170,4 +174,59 @@ func buildCallActionNode(action string, call IncomingCall) waBinary.Node {
 // reference GenerateCallStanzaID).
 func generateStanzaID() string {
 	return strings.ToUpper(hex.EncodeToString(random.Bytes(16)))
+}
+
+// DecryptCallKey Signal-decrypts the 32-byte call key from an incoming call's
+// offer (the <enc> node encrypted for our device). This verifies the call-key
+// crypto on real data without setting up any media. Returns ErrDisabled when off.
+func (m *Manager) DecryptCallKey(ctx context.Context, call IncomingCall) ([]byte, error) {
+	if !m.enabled {
+		return nil, ErrDisabled
+	}
+	enc := findEncNode(call.Offer)
+	if enc == nil {
+		return nil, fmt.Errorf("voip: no <enc> node in offer for call %s", call.CallID)
+	}
+	return m.sock.DecryptCallKey(ctx, call.From, enc)
+}
+
+// StartCall initiates a 1:1 audio call to peer: it builds and sends the
+// <call><offer> (USync + per-device call-key encryption) and parses the relay
+// ack. NO media is set up (the audio transport is a later phase). Returns the
+// call id and the parsed relay endpoints. ⚠️ disposable accounts only.
+func (m *Manager) StartCall(ctx context.Context, peer types.JID) (string, *ParsedRelayAck, error) {
+	if !m.enabled {
+		return "", nil, ErrDisabled
+	}
+	callID := GenerateCallID()
+	callKey := GenerateCallKey()
+	offer, err := BuildOfferStanza(ctx, m.sock, callID, callKey, peer, false)
+	if err != nil {
+		return callID, nil, fmt.Errorf("build offer: %w", err)
+	}
+	m.log.Infof("Starting call id=%s to=%s (offer handshake, no audio)", callID, peer)
+	ack, err := m.sock.Query(ctx, offer)
+	if err != nil {
+		return callID, nil, fmt.Errorf("send offer: %w", err)
+	}
+	relays := ParseRelayFromAck(ack)
+	m.log.Infof("Call %s ack: %d relay endpoint(s), %d participant(s), uuid=%s", callID, len(relays.Relays), len(relays.ParticipantJids), relays.UUID)
+	return callID, &relays, nil
+}
+
+// findEncNode returns the first <enc> node found (recursively) under n.
+func findEncNode(n *waBinary.Node) *waBinary.Node {
+	if n == nil {
+		return nil
+	}
+	for _, c := range nodeChildren(n) {
+		c := c
+		if c.Tag == "enc" {
+			return &c
+		}
+		if found := findEncNode(&c); found != nil {
+			return found
+		}
+	}
+	return nil
 }

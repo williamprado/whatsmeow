@@ -31,17 +31,11 @@ package voip
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
 )
-
-// ErrVoIPPhase1 is returned by the cryptographic VoipSocket methods that are
-// intentionally not implemented in Phase 0 (offer/accept call-key encryption and
-// decryption). They arrive with Phase 1.
-var ErrVoIPPhase1 = errors.New("voip: call-key crypto is not implemented in Phase 0 (Phase 1)")
 
 // clientAPI is the small slice of *whatsmeow.Client behaviour the adapter needs.
 // It is an interface so the adapter (and the Manager) can be unit-tested without
@@ -57,12 +51,19 @@ type clientAPI interface {
 	GetUSyncDevices(ctx context.Context, jids []types.JID) ([]types.JID, error)
 	ResolveLIDForPN(ctx context.Context, pn types.JID) types.JID
 	GetPrivacyToken(ctx context.Context, jid types.JID) ([]byte, error)
+	GenerateMessageID() string
+	// EncryptMessageForDevices Signal-encrypts plaintext for each device,
+	// producing the <to>/<enc> participant nodes (returns includeDeviceIdentity).
+	EncryptMessageForDevices(ctx context.Context, devices []types.JID, id string, plaintext, dsm []byte, encAttrs waBinary.Attrs) ([]waBinary.Node, bool, error)
+	// DecryptDM Signal-decrypts an <enc> child from a peer.
+	DecryptDM(ctx context.Context, child *waBinary.Node, from types.JID, isPreKey bool) ([]byte, error)
 }
 
-// VoipSocket is the seam between the (future, lifted) call logic and whatsmeow,
-// mirroring core.VoipSocket in the reference. Phase 0 implements the plaintext
-// plumbing (send/query/identity/usync/lid/token); the call-key crypto methods
-// return ErrVoIPPhase1 until Phase 1.
+// VoipSocket is the seam between the call logic and whatsmeow, mirroring
+// core.VoipSocket in the reference. It implements the plaintext plumbing
+// (send/query/identity/usync/lid/token) plus the call-key crypto
+// (CreateParticipantNodes / DecryptCallKey) over Client.DangerousInternals().
+// Media (SRTP/STUN/transport) is a later phase.
 type VoipSocket interface {
 	OwnPN() types.JID
 	OwnLID() types.JID
@@ -133,12 +134,25 @@ func (s *socket) AssertSessions(ctx context.Context, jids []types.JID, force boo
 	return nil
 }
 
-// CreateParticipantNodes (Phase 1) — Signal-encrypts the call key per device.
+// CreateParticipantNodes Signal-encrypts the 32-byte call key for each device
+// (wrapped in waE2E.Message{Call:{CallKey}}), producing the <destination>
+// participant nodes for an offer/accept. Replicates the reference adapter.
 func (s *socket) CreateParticipantNodes(ctx context.Context, devices []types.JID, callKey []byte, encAttrs waBinary.Attrs) ([]waBinary.Node, bool, error) {
-	return nil, false, ErrVoIPPhase1
+	plaintext, err := encodeCallKeyMessage(callKey)
+	if err != nil {
+		return nil, false, err
+	}
+	id := s.api.GenerateMessageID()
+	return s.api.EncryptMessageForDevices(ctx, devices, id, plaintext, plaintext, encAttrs)
 }
 
-// DecryptCallKey (Phase 1) — Signal-decrypts the peer's call key.
+// DecryptCallKey Signal-decrypts the peer's 32-byte call key from an <enc> node
+// (pkmsg => prekey message). Replicates the reference adapter.
 func (s *socket) DecryptCallKey(ctx context.Context, from types.JID, encChild *waBinary.Node) ([]byte, error) {
-	return nil, ErrVoIPPhase1
+	typ, _ := encChild.Attrs["type"].(string)
+	plaintext, err := s.api.DecryptDM(ctx, encChild, from, typ == "pkmsg")
+	if err != nil {
+		return nil, err
+	}
+	return decodeCallKeyPlaintext(plaintext)
 }
