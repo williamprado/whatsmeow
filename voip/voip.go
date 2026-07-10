@@ -4,229 +4,349 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+// Package voip is the companion module that adds WhatsApp voice-call (VoIP)
+// support to this whatsmeow fork. It is a SEPARATE Go module so the heavy media
+// dependency tree (pion, MLow codec, SRTP/STUN) never touches the main
+// go.mau.fi/whatsmeow go.mod.
+//
+// The call logic (signaling, MLow codec, SRTP, relay transport, state machine)
+// was ported from the reference williamprado/WaCalls
+// (JotaDev66/WaCalls, branch feat/native-mlow-pcm-transport). This top-level
+// Manager wires that logic onto a *whatsmeow.Client from this fork.
+//
+// ⚠️ VERY HIGH account-ban risk. Everything is gated behind Config.Enabled
+// (default false) and must be exercised only on disposable accounts — never the
+// production account, never the production pin.
 package voip
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"strings"
+	"log/slog"
 	"sync"
-	"time"
 
-	"go.mau.fi/util/random"
+	"github.com/williamprado/whatsmeow/voip/call"
+	"github.com/williamprado/whatsmeow/voip/core"
+	"github.com/williamprado/whatsmeow/voip/signaling"
+	"github.com/williamprado/whatsmeow/voip/wa"
+	"github.com/williamprado/whatsmeow/voip/wanode"
 
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
-	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// Config configures the voip Manager.
+// ErrDisabled is returned by every call action when Config.Enabled is false.
+var ErrDisabled = errors.New("voip: disabled (set Config.Enabled = true)")
+
+// ErrNoSuchCall is returned when an action references an unknown call id.
+var ErrNoSuchCall = errors.New("voip: no active call with that id")
+
+// ErrBusy is returned by StartCall/incoming offers when the concurrent-call
+// limit (Config.MaxConcurrentCalls) is reached.
+var ErrBusy = errors.New("voip: concurrent call limit reached")
+
+// Config controls the VoIP manager.
 type Config struct {
-	// Enabled gates the entire VoIP subsystem. Default false. When false the
-	// Manager registers no event handler and Reject/Terminate return ErrDisabled.
-	// ⚠️ Only enable on a DISPOSABLE test account — never production.
+	// Enabled must be true for any call to be sent, accepted, or answered.
+	// Default false — receiving offers still emits OnIncomingCall so the caller
+	// can decide, but no media/crypto is set up unless enabled.
 	Enabled bool
+	// MaxConcurrentCalls caps simultaneous calls (0 = unlimited). Extra inbound
+	// offers are auto-rejected.
+	MaxConcurrentCalls int
 }
 
-// IncomingCall describes a received call offer.
-type IncomingCall struct {
-	CallID      string
-	From        types.JID // the caller
-	CallCreator types.JID
-	Timestamp   time.Time
-	// Offer is the raw <offer> node (carries the encrypted call key). Used by
-	// DecryptCallKey; nil for synthesized calls.
-	Offer *waBinary.Node
-}
-
-// ErrDisabled is returned by actions when the Manager is not enabled.
-var ErrDisabled = errors.New("voip: disabled (set Config.Enabled=true; DISPOSABLE accounts only)")
-
-// Manager detects incoming calls and can reject/terminate them. Phase 0:
-// receive-only, no audio. Everything is gated by Config.Enabled.
+// Manager owns per-call state machines and bridges whatsmeow call events into
+// them. Create one per *whatsmeow.Client.
 type Manager struct {
-	cli     *whatsmeow.Client
-	sock    VoipSocket
-	enabled bool
-	log     waLog.Logger
+	client *whatsmeow.Client
+	sock   *wa.Socket
+	log    *slog.Logger
+	cfg    Config
 
-	mu         sync.Mutex
-	handlerID  uint32
-	onIncoming func(IncomingCall)
+	mu    sync.Mutex
+	calls map[string]*call.CallManager
+
+	onIncoming    func(*call.CallInfo)
+	onStateChange func(*call.CallInfo)
+	onEnded       func(*call.CallInfo)
+	onPeerAudio   func(callID string, pcm16 []float32)
+
+	handlerID uint32
+	started   bool
 }
 
-// NewManager creates a voip Manager for the given client. log may be nil.
-func NewManager(cli *whatsmeow.Client, cfg Config, log waLog.Logger) *Manager {
+// New creates a VoIP manager for client. log may be nil (slog.Default is used).
+func New(client *whatsmeow.Client, cfg Config, log *slog.Logger) *Manager {
 	if log == nil {
-		log = waLog.Noop
+		log = slog.Default()
 	}
 	return &Manager{
-		cli:     cli,
-		sock:    NewVoipSocket(cli),
-		enabled: cfg.Enabled,
-		log:     log,
+		client: client,
+		sock:   wa.NewSocket(client),
+		log:    log,
+		cfg:    cfg,
+		calls:  make(map[string]*call.CallManager),
 	}
 }
 
-// Enabled reports whether the VoIP subsystem is on.
-func (m *Manager) Enabled() bool { return m.enabled }
-
-// Socket exposes the VoipSocket adapter (for Phase 1 wiring/tests).
-func (m *Manager) Socket() VoipSocket { return m.sock }
-
-// OnIncomingCall sets the callback fired for each incoming call offer.
-func (m *Manager) OnIncomingCall(fn func(IncomingCall)) {
-	m.mu.Lock()
-	m.onIncoming = fn
-	m.mu.Unlock()
-}
-
-// Start registers the call event handler. It is a no-op (logs a notice) when
-// disabled, so it is always safe to call.
+// Start subscribes to the client's call events. Safe to call once.
 func (m *Manager) Start() {
-	if !m.enabled {
-		m.log.Infof("VoIP disabled (Config.Enabled=false) — not listening for calls")
-		return
-	}
-	m.log.Warnf("VoIP ENABLED (Phase 0: receive-only, no audio) — DISPOSABLE accounts only, ban risk")
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.handlerID == 0 {
-		m.handlerID = m.cli.AddEventHandler(m.handleEvent)
+	if m.started {
+		return
 	}
+	m.handlerID = m.client.AddEventHandler(m.handleEvent)
+	m.started = true
+	m.log.Info("voip manager started", "enabled", m.cfg.Enabled)
 }
 
-// Stop removes the event handler.
+// Stop unsubscribes and tears down every active call.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	id := m.handlerID
-	m.handlerID = 0
-	m.mu.Unlock()
-	if id != 0 {
-		m.cli.RemoveEventHandler(id)
-	}
-}
-
-func (m *Manager) handleEvent(evt any) {
-	switch e := evt.(type) {
-	case *events.CallOffer:
-		call := IncomingCall{
-			CallID:      e.CallID,
-			From:        e.From,
-			CallCreator: e.CallCreator,
-			Timestamp:   e.Timestamp,
-			Offer:       e.Data,
-		}
-		m.log.Infof("Incoming call: id=%s from=%s creator=%s ts=%s", call.CallID, call.From, call.CallCreator, call.Timestamp.Format(time.RFC3339))
-		m.mu.Lock()
-		cb := m.onIncoming
+	if !m.started {
 		m.mu.Unlock()
-		if cb != nil {
-			cb(call)
-		}
-	case *events.CallTerminate:
-		m.log.Infof("Call terminated: id=%s reason=%s", e.CallID, e.Reason)
-	case *events.CallReject:
-		m.log.Infof("Call rejected by peer: id=%s", e.CallID)
+		return
+	}
+	m.client.RemoveEventHandler(m.handlerID)
+	m.started = false
+	active := make([]*call.CallManager, 0, len(m.calls))
+	for _, cm := range m.calls {
+		active = append(active, cm)
+	}
+	m.calls = make(map[string]*call.CallManager)
+	m.mu.Unlock()
+
+	for _, cm := range active {
+		_ = cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
 	}
 }
 
-// Reject sends a clean <call><reject/> for the given call. No audio is set up.
-func (m *Manager) Reject(ctx context.Context, call IncomingCall) error {
-	return m.sendCallAction(ctx, "reject", call)
+// OnIncomingCall registers a callback fired when a new inbound call rings.
+func (m *Manager) OnIncomingCall(fn func(*call.CallInfo)) { m.onIncoming = fn }
+
+// OnCallStateChange registers a callback fired on every call state transition.
+func (m *Manager) OnCallStateChange(fn func(*call.CallInfo)) { m.onStateChange = fn }
+
+// OnCallEnded registers a callback fired once when a call ends.
+func (m *Manager) OnCallEnded(fn func(*call.CallInfo)) { m.onEnded = fn }
+
+// OnPeerAudio registers a callback delivering decoded 16 kHz mono float32 PCM
+// from the remote party, tagged with the call id.
+func (m *Manager) OnPeerAudio(fn func(callID string, pcm16 []float32)) { m.onPeerAudio = fn }
+
+// StartCall places an outbound call to peer and returns the generated call id.
+func (m *Manager) StartCall(ctx context.Context, peer types.JID, isVideo bool) (string, error) {
+	if !m.cfg.Enabled {
+		return "", ErrDisabled
+	}
+	if !m.hasCapacity() {
+		return "", ErrBusy
+	}
+	callID := signaling.GenerateCallID()
+	cm := m.newCallManager(callID)
+	if err := cm.StartCall(ctx, callID, peer, isVideo); err != nil {
+		m.removeCall(callID)
+		return "", err
+	}
+	return callID, nil
 }
 
-// Terminate sends a clean <call><terminate/> for the given call.
-func (m *Manager) Terminate(ctx context.Context, call IncomingCall) error {
-	return m.sendCallAction(ctx, "terminate", call)
-}
-
-func (m *Manager) sendCallAction(ctx context.Context, action string, call IncomingCall) error {
-	if !m.enabled {
+// AcceptCall answers a ringing inbound call.
+func (m *Manager) AcceptCall(ctx context.Context, callID string) error {
+	if !m.cfg.Enabled {
 		return ErrDisabled
 	}
-	m.log.Infof("Sending <call><%s> for id=%s to=%s", action, call.CallID, call.From)
-	return m.sock.SendNode(ctx, buildCallActionNode(action, call))
+	cm, ok := m.getCall(callID)
+	if !ok {
+		return ErrNoSuchCall
+	}
+	return cm.AcceptCall(ctx, callID)
 }
 
-// buildCallActionNode builds a plaintext <call to=…><action call-id call-creator/></call>
-// node, matching the reference (WaCalls) reject/terminate stanzas.
-func buildCallActionNode(action string, call IncomingCall) waBinary.Node {
-	creator := call.CallCreator
-	if creator.IsEmpty() {
-		creator = call.From
+// RejectCall declines a ringing inbound call.
+func (m *Manager) RejectCall(ctx context.Context, callID string, reason core.EndCallReason) error {
+	if reason == "" {
+		reason = core.EndCallReasonDeclined
 	}
-	return waBinary.Node{
-		Tag:   "call",
-		Attrs: waBinary.Attrs{"to": call.From, "id": generateStanzaID()},
-		Content: []waBinary.Node{{
-			Tag:   action,
-			Attrs: waBinary.Attrs{"call-id": call.CallID, "call-creator": creator},
-		}},
+	cm, ok := m.getCall(callID)
+	if !ok {
+		return ErrNoSuchCall
 	}
+	return cm.RejectCall(ctx, callID, reason)
 }
 
-// generateStanzaID returns 16 random bytes as uppercase hex (matches the
-// reference GenerateCallStanzaID).
-func generateStanzaID() string {
-	return strings.ToUpper(hex.EncodeToString(random.Bytes(16)))
+// EndCall hangs up an active or outbound call.
+func (m *Manager) EndCall(ctx context.Context, callID string, reason core.EndCallReason) error {
+	if reason == "" {
+		reason = core.EndCallReasonUserEnded
+	}
+	cm, ok := m.getCall(callID)
+	if !ok {
+		return ErrNoSuchCall
+	}
+	return cm.EndCall(ctx, reason)
 }
 
-// DecryptCallKey Signal-decrypts the 32-byte call key from an incoming call's
-// offer (the <enc> node encrypted for our device). This verifies the call-key
-// crypto on real data without setting up any media. Returns ErrDisabled when off.
-func (m *Manager) DecryptCallKey(ctx context.Context, call IncomingCall) ([]byte, error) {
-	if !m.enabled {
-		return nil, ErrDisabled
+// FeedCapturedPCM pushes locally-captured 16 kHz mono float32 microphone PCM
+// into the call's encoder → SRTP → relay path.
+func (m *Manager) FeedCapturedPCM(callID string, pcm16 []float32) error {
+	cm, ok := m.getCall(callID)
+	if !ok {
+		return ErrNoSuchCall
 	}
-	enc := findEncNode(call.Offer)
-	if enc == nil {
-		return nil, fmt.Errorf("voip: no <enc> node in offer for call %s", call.CallID)
-	}
-	return m.sock.DecryptCallKey(ctx, call.From, enc)
-}
-
-// StartCall initiates a 1:1 audio call to peer: it builds and sends the
-// <call><offer> (USync + per-device call-key encryption) and parses the relay
-// ack. NO media is set up (the audio transport is a later phase). Returns the
-// call id and the parsed relay endpoints. ⚠️ disposable accounts only.
-func (m *Manager) StartCall(ctx context.Context, peer types.JID) (string, *ParsedRelayAck, error) {
-	if !m.enabled {
-		return "", nil, ErrDisabled
-	}
-	callID := GenerateCallID()
-	callKey := GenerateCallKey()
-	offer, err := BuildOfferStanza(ctx, m.sock, callID, callKey, peer, false)
-	if err != nil {
-		return callID, nil, fmt.Errorf("build offer: %w", err)
-	}
-	m.log.Infof("Starting call id=%s to=%s (offer handshake, no audio)", callID, peer)
-	ack, err := m.sock.Query(ctx, offer)
-	if err != nil {
-		return callID, nil, fmt.Errorf("send offer: %w", err)
-	}
-	relays := ParseRelayFromAck(ack)
-	m.log.Infof("Call %s ack: %d relay endpoint(s), %d participant(s), uuid=%s", callID, len(relays.Relays), len(relays.ParticipantJids), relays.UUID)
-	return callID, &relays, nil
-}
-
-// findEncNode returns the first <enc> node found (recursively) under n.
-func findEncNode(n *waBinary.Node) *waBinary.Node {
-	if n == nil {
-		return nil
-	}
-	for _, c := range nodeChildren(n) {
-		c := c
-		if c.Tag == "enc" {
-			return &c
-		}
-		if found := findEncNode(&c); found != nil {
-			return found
-		}
-	}
+	cm.FeedCapturedPCM(pcm16)
 	return nil
+}
+
+// CurrentCall returns the CallInfo for a given id, if present.
+func (m *Manager) CurrentCall(callID string) (*call.CallInfo, bool) {
+	cm, ok := m.getCall(callID)
+	if !ok {
+		return nil, false
+	}
+	return cm.CurrentCall(), true
+}
+
+// --- internals ---
+
+func (m *Manager) hasCapacity() bool {
+	if m.cfg.MaxConcurrentCalls <= 0 {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls) < m.cfg.MaxConcurrentCalls
+}
+
+func (m *Manager) getCall(callID string) (*call.CallManager, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cm, ok := m.calls[callID]
+	return cm, ok
+}
+
+func (m *Manager) removeCall(callID string) {
+	m.mu.Lock()
+	delete(m.calls, callID)
+	m.mu.Unlock()
+}
+
+func (m *Manager) newCallManager(callID string) *call.CallManager {
+	cm := call.NewCallManager(m.sock, m.log)
+	cm.OnIncoming = func(c *call.CallInfo) {
+		if m.onIncoming != nil {
+			m.onIncoming(c)
+		}
+	}
+	cm.OnStateChange = func(c *call.CallInfo) {
+		if c.IsEnded() {
+			m.removeCall(c.CallID)
+		}
+		if m.onStateChange != nil {
+			m.onStateChange(c)
+		}
+	}
+	cm.OnEnded = func(c *call.CallInfo) {
+		m.removeCall(c.CallID)
+		if m.onEnded != nil {
+			m.onEnded(c)
+		}
+	}
+	cm.OnPeerAudio = func(pcm16 []float32) {
+		if m.onPeerAudio != nil {
+			m.onPeerAudio(callID, pcm16)
+		}
+	}
+	m.mu.Lock()
+	m.calls[callID] = cm
+	m.mu.Unlock()
+	return cm
+}
+
+func (m *Manager) handleEvent(rawEvt any) {
+	ctx := context.Background()
+	switch evt := rawEvt.(type) {
+	case *events.CallOffer:
+		m.onIncomingOffer(ctx, evt.From, evt.Data)
+	case *events.CallAccept:
+		if cm, ok := m.callForNode(evt.From, evt.Data); ok {
+			cm.HandleCallAccept(ctx, wrapCall(evt.From, evt.Data), evt.From)
+		}
+	case *events.CallTransport:
+		if cm, ok := m.callForNode(evt.From, evt.Data); ok {
+			cm.HandleCallTransport(ctx, wrapCall(evt.From, evt.Data), evt.From)
+		}
+	case *events.CallTerminate:
+		if cm, ok := m.callForNode(evt.From, evt.Data); ok {
+			cm.HandleCallTerminate(wrapCall(evt.From, evt.Data))
+		}
+	case *events.CallReject:
+		if cm, ok := m.callForNode(evt.From, evt.Data); ok {
+			cm.HandleCallTerminate(wrapCall(evt.From, evt.Data))
+		}
+	}
+}
+
+func (m *Manager) onIncomingOffer(ctx context.Context, from types.JID, data *waBinary.Node) {
+	node := wrapCall(from, data)
+	callID := callIDFromNode(node)
+	if callID == "" {
+		return
+	}
+	// If the manager is disabled, or we are at capacity, reject the offer.
+	if !m.cfg.Enabled || !m.hasCapacity() {
+		m.rejectOffer(ctx, node, from)
+		return
+	}
+	cm := m.newCallManager(callID)
+	cm.HandleCallOffer(ctx, node, from)
+}
+
+func (m *Manager) rejectOffer(ctx context.Context, node *waBinary.Node, from types.JID) {
+	info := signaling.ExtractNodeInfo(node)
+	if info == nil {
+		return
+	}
+	creator := wanode.AttrString(info.InnerNode.Attrs, "call-creator")
+	if creator == "" {
+		creator = from.String()
+	}
+	reject := signaling.BuildRejectStanza(from, info.CallID, wanode.MustJID(creator))
+	_ = m.sock.SendNode(ctx, reject)
+	m.log.Info("inbound call rejected (disabled or at capacity)", "call_id", info.CallID)
+}
+
+func (m *Manager) callForNode(from types.JID, data *waBinary.Node) (*call.CallManager, bool) {
+	callID := callIDFromNode(wrapCall(from, data))
+	if callID == "" {
+		return nil, false
+	}
+	return m.getCall(callID)
+}
+
+// wrapCall rebuilds the <call from><inner/></call> envelope that the parsers in
+// the signaling/ and call/ packages expect (whatsmeow delivers only the inner
+// node via the event).
+func wrapCall(from types.JID, inner *waBinary.Node) *waBinary.Node {
+	content := []waBinary.Node{}
+	if inner != nil {
+		content = append(content, *inner)
+	}
+	return &waBinary.Node{
+		Tag:     "call",
+		Attrs:   waBinary.Attrs{"from": from},
+		Content: content,
+	}
+}
+
+func callIDFromNode(node *waBinary.Node) string {
+	info := signaling.ExtractNodeInfo(node)
+	if info == nil {
+		return ""
+	}
+	return info.CallID
 }
