@@ -1,0 +1,63 @@
+name: Build and Push Docker Image
+
+# Mesma automacao do atendzappy_versao2: push na main builda a imagem da API
+# VoIP (voip-bridge-server), auto-incrementa a versao vX.Y.Z a partir das tags
+# do Docker Hub e publica a tag versionada + latest via build_and_push.sh.
+# Em pull requests apenas valida o build, sem push.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: docker-build-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_USERNAME: ${{ vars.DOCKER_USERNAME || secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD || secrets.DOCKER_TOKEN }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v6
+
+      - name: Validate Docker Hub credentials
+        if: github.event_name != 'pull_request'
+        run: |
+          if [ -z "${DOCKER_USERNAME}" ] || [ -z "${DOCKER_PASSWORD}" ]; then
+            echo "::error::Configure os secrets/vars do repositorio para Docker Hub antes de rodar este workflow."
+            echo "::error::Necessario: DOCKER_USERNAME (secret ou variable) e DOCKER_PASSWORD ou DOCKER_TOKEN (secret)."
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Make script executable
+        run: chmod +x build_and_push.sh
+
+      - name: Run build and push script
+        if: github.event_name != 'pull_request'
+        run: ./build_and_push.sh
+
+      - name: Build only (pull request validation)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "PR build - validacao sem push para o registry."
+
+          docker build \
+            -t atendzappy-whatsmeow:pr-${{ github.event.pull_request.number }} \
+            -f Dockerfile .
+
+          echo "::notice::Build de PR concluido localmente. Nenhuma imagem publicada no registry."
