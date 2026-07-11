@@ -16,7 +16,7 @@ set -euo pipefail
 ## ========================= CONFIGURACOES ========================= ##
 
 DOCKER_USER="${DOCKER_USERNAME:-williamwilmer10}"
-REPOSITORY="${WHATSMEOW_REPOSITORY:-atendzappy-whatsmeow}"
+REPOSITORY="${WHATSMEOW_REPOSITORY:-whatsmeow-voip-bridge}"
 IMAGE="${DOCKER_USER}/${REPOSITORY}"
 MIN_VERSION="1.0.0"
 VERSION_FILE=".docker_version"
