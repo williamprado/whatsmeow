@@ -1,0 +1,13 @@
+.git
+.github
+docs
+*.md
+go-check.ps1
+Dockerfile
+.dockerignore
+build_and_push.sh
+.docker_version
+# artefatos locais de sessão/CDR — nunca dentro da imagem
+**/session.db
+**/*.db
+**/cdr.jsonl
